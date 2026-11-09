@@ -1,0 +1,73 @@
+-- Modello di robustezza della piattaforma IoT per la building automation
+-- Ogni componente puo' essere: ok, guasto (guasto silenzioso), compromesso (guasto bizantino)
+-- Al massimo un componente alla volta non e' ok
+-- Una funzione del sistema e' disponibile se nessuno dei componenti necessari e' guasto
+
+MODULE main
+
+VAR
+
+device      : componente;   -- dispositivo (Logic Machine) con i suoi agent
+gateway     : componente;   -- gateway KNX/IP
+broker      : componente;   -- broker MQTT
+core        : componente;   -- Core con il suo database
+redis       : componente;   -- Redis
+state_agent : componente;   -- agent del core che scrive lo stato del dispositivo in Redis
+
+-- ipotesi di guasto: al massimo un componente non e' ok
+INVAR
+  toint(device.stato != ok) + toint(gateway.stato != ok) + toint(broker.stato != ok)
+  + toint(core.stato != ok) + toint(redis.stato != ok) + toint(state_agent.stato != ok) <= 1;
+
+-- funzioni del sistema
+DEFINE comando_ok := core.stato != guasto & broker.stato != guasto
+                   & device.stato != guasto & gateway.stato != guasto;
+
+DEFINE stato_visibile := device.stato != guasto & broker.stato != guasto
+                       & state_agent.stato != guasto & redis.stato != guasto
+                       & core.stato != guasto;
+
+-- criticita': se il broker si guasta, i comandi non sono disponibili
+CTLSPEC
+AG (broker.stato = guasto -> !comando_ok)
+
+--tolleranza: se il broker si guasta, i comandi possono funzionare
+CTLSPEC
+EF (broker.stato = guasto & comando_ok)
+
+-- criticita': se il broker si guasta, lo stato del dispositivo non e' visibile
+CTLSPEC
+AG (broker.stato = guasto -> !stato_visibile)
+
+--tolleranza: se il broker si guasta, lo stato del dispositivo non è visibile
+CTLSPEC
+EF(broker.stato = guasto ->!stato_visibile)
+
+-- criticita': se Redis si guasta, i comandi non sono disponibili(da verificare con prova)
+CTLSPEC
+AG (redis.stato = guasto -> !comando_ok)
+
+-- tolleranza (proprieta' di raggiungibilita'): i comandi possono funzionare con Redis guasto
+CTLSPEC
+EF (redis.stato = guasto & comando_ok)
+
+-- criticita': se Redis si guasta, lo stato del dispositivo non e' visibile
+CTLSPEC
+AG (redis.stato = guasto -> !stato_visibile)
+
+--tolleranza: se Redis si guasta, lo stato del dispositivo non è visibile
+EF (redis.stato = guasto ->!stato_visibile)
+
+
+-- MODELLO DEL COMPONENTE:
+-- lo stato cambia in modo non deterministico (i guasti possono comparire e sparire in qualunque momento)
+
+MODULE componente
+
+VAR
+stato : {ok, guasto, compromesso};
+
+ASSIGN
+
+init(stato) := ok;
+next(stato) := {ok, guasto, compromesso};
