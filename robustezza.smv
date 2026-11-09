@@ -7,17 +7,27 @@ MODULE main
 
 VAR
 
-device      : componente;   -- dispositivo (Logic Machine) con i suoi agent
-gateway     : componente;   -- gateway KNX/IP
-broker      : componente;   -- broker MQTT
-core        : componente;   -- Core con il suo database
-redis       : componente;   -- Redis
-state_agent : componente;   -- agent del core che scrive lo stato del dispositivo in Redis
+device          : componente;   -- dispositivo (Logic Machine) con i suoi agent
+gateway         : componente;   -- gateway KNX/IP
+broker          : componente;   -- broker MQTT
+core            : componente;   -- Core con il suo database
+redis           : componente;   -- Redis
+state_agent     : componente;   -- agent del core che scrive lo stato del dispositivo in Redis
+response_agent  : componente;   -- agent del core che riceve l'esito dei comandi
+event_agent     : componente;   -- agent del core che riceve gli eventi KNX
+telemetry_agent : componente;   -- agent del core che riceve la telemetria
+reverb          : componente;   -- server WebSocket per il tempo reale
+provisioner     : componente;   -- consegna le credenziali ai device
+license_mgr     : componente;   -- License Manager
+pannello        : componente;   -- pannello web nel browser
 
 -- ipotesi di guasto: al massimo un componente non e' ok
 INVAR
   toint(device.stato != ok) + toint(gateway.stato != ok) + toint(broker.stato != ok)
-  + toint(core.stato != ok) + toint(redis.stato != ok) + toint(state_agent.stato != ok) <= 1;
+  + toint(core.stato != ok) + toint(redis.stato != ok) + toint(state_agent.stato != ok) 
+  + toint(response_agent.stato != ok) + toint(event_agent.stato != ok) + toint(telemetry_agent.stato != ok) 
+  + toint (telemetry_agent.stato != ok) + toint(reverb.stato != ok) + toint(provisioner.stato != ok)
+  + toint (license_mgr.stato != ok) + toint (pannello.stato != ok) <= 1;
 
 -- funzioni del sistema
 DEFINE comando_ok := core.stato != guasto & broker.stato != guasto
