@@ -27,6 +27,27 @@ DEFINE stato_visibile := device.stato != guasto & broker.stato != guasto
                        & state_agent.stato != guasto & redis.stato != guasto
                        & core.stato != guasto;
 
+
+--====== CORE =======--
+-- criticita': se il core si guasta, i comandi non sono disponibili
+CTLSPEC
+AG (core.stato = guasto -> !comando_ok)
+
+-- tolleranza: se il core si guasta, i comandi sono disponibili
+CTLSPEC
+EF (core.stato = guasto & comando_ok)
+
+-- criticita': se il core si guasta lo stato si interrompe
+CTLSPEC
+AG (core.stato = guasto -> !stato_visibile)
+
+--tolleranza: se il core si guasta, lo stato è visibile
+CTLSPEC
+EF (core.stato = guasto & stato_visibile)
+
+
+--======= BROKER =======--
+
 -- criticita': se il broker si guasta, i comandi non sono disponibili
 CTLSPEC
 AG (broker.stato = guasto -> !comando_ok)
@@ -39,9 +60,11 @@ EF (broker.stato = guasto & comando_ok)
 CTLSPEC
 AG (broker.stato = guasto -> !stato_visibile)
 
---tolleranza: se il broker si guasta, lo stato del dispositivo non è visibile
+--tolleranza: se il broker si guasta, lo stato del dispositivo è visibile
 CTLSPEC
-EF(broker.stato = guasto ->!stato_visibile)
+EF(broker.stato = guasto & stato_visibile)
+
+--======= REDIS ======--
 
 -- criticita': se Redis si guasta, i comandi non sono disponibili(da verificare con prova)
 CTLSPEC
@@ -55,8 +78,10 @@ EF (redis.stato = guasto & comando_ok)
 CTLSPEC
 AG (redis.stato = guasto -> !stato_visibile)
 
---tolleranza: se Redis si guasta, lo stato del dispositivo non è visibile
-EF (redis.stato = guasto ->!stato_visibile)
+--tolleranza: se Redis si guasta, lo stato del dispositivo è visibile
+CTLSPEC
+EF (redis.stato = guasto & stato_visibile)
+
 
 
 -- MODELLO DEL COMPONENTE:
