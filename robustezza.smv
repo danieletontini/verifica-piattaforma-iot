@@ -9,7 +9,10 @@ MODULE main
 
 VAR
 
-device          : componente;   -- dispositivo (Logic Machine) con i suoi agent
+device          : componente;   -- dispositivo (Logic Machine)
+sst_agent       : componente;   -- agent del device che pubblica stato e telemetria (StateTelemetryAgent)
+knx_listener    : componente;   -- agent del device che inoltra gli eventi del bus KNX
+command_agent   : componente;   -- agent del device che esegue i comandi
 gateway         : componente;   -- gateway KNX/IP
 broker          : componente;   -- broker MQTT
 core            : componente;   -- Core con il suo database
@@ -25,7 +28,8 @@ pannello        : componente;   -- pannello web nel browser
 
 -- ipotesi di guasto: al massimo un componente non e' ok
 INVAR
-  toint(device.stato != ok) + toint(gateway.stato != ok) + toint(broker.stato != ok)
+  toint(device.stato != ok) + toint(pannello.stato != ok) + toint(stt_agent.stato != ok) + toint(knx_listener.stato != ok)
+  + toint(command_agent.stato != ok) + toint(gateway.stato != ok) + toint(broker.stato != ok)
   + toint(core.stato != ok) + toint(redis.stato != ok) + toint(state_agent.stato != ok)
   + toint(response_agent.stato != ok) + toint(event_agent.stato != ok) + toint(telemetry_agent.stato != ok)
   + toint(reverb.stato != ok) + toint(provisioner.stato != ok) + toint(license_mgr.stato != ok)
@@ -35,29 +39,29 @@ INVAR
 
 -- F1 comando: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX
 DEFINE comando_ok := pannello.stato != guasto & core.stato != guasto & broker.stato != guasto
-                   & device.stato != guasto & gateway.stato != guasto;
+                   & device.stato != guasto & gateway.stato != guasto & command_agent.stato != guasto;
 
 -- F2 conferma della configurazione inviata ai device: (file JSON: utenti, zone, template):
 -- Core (invio) -> broker -> device (CommandAgent) -> broker -> response_agent -> Redis -> Core (RedisCommandResponses)
 DEFINE esito_ok := core.stato != guasto & device.stato != guasto & broker.stato != guasto & response_agent.stato != guasto
-                 & redis.stato != guasto;
+                 & redis.stato != guasto & command_agent.stato != guasto;
 
 -- F3 stato del dispositivo: device -> broker -> state_agent -> Redis -> Core -> pannello
 DEFINE stato_visibile := device.stato != guasto & broker.stato != guasto & state_agent.stato != guasto
-                       & redis.stato != guasto & core.stato != guasto & pannello.stato != guasto;
+                       & redis.stato != guasto & core.stato != guasto & pannello.stato != guasto & sst_agent.stato != guasto;
 
 -- F4 valore degli item: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Redis -> Core -> pannello
 DEFINE valore_item_ok := gateway.stato != guasto & device.stato != guasto & broker.stato != guasto
                        & event_agent.stato != guasto & redis.stato != guasto & core.stato != guasto
-                       & pannello.stato != guasto;
+                       & pannello.stato != guasto & knx_listener.stato != guasto;
 
 -- F5 tempo reale: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Reverb -> pannello
 DEFINE tempo_reale_ok := gateway.stato != guasto & device.stato != guasto & broker.stato != guasto
-                       & event_agent.stato != guasto & reverb.stato != guasto & pannello.stato != guasto;
+                       & event_agent.stato != guasto & reverb.stato != guasto & pannello.stato != guasto & knx_listener.stato != guasto;
 
 -- F6 moduli installati (telemetria): device -> broker -> telemetry_agent -> Redis -> Core
 DEFINE moduli_ok := device.stato != guasto & broker.stato != guasto & telemetry_agent.stato != guasto
-                  & redis.stato != guasto & core.stato != guasto;
+                  & redis.stato != guasto & core.stato != guasto & sst_agent.stato != guasto;
 
 -- F7 provisioning: device -> Provisioner -> Core (database) e Provisioner -> broker (dynsec)
 DEFINE provisioning_ok := device.stato != guasto & provisioner.stato != guasto & core.stato != guasto
@@ -128,6 +132,86 @@ AG (device.stato = guasto -> !provisioning_ok)
 CTLSPEC
 EF (device.stato = guasto & provisioning_ok)
 
+
+--======= STT_AGENT (StateTelemetryAgent del device) =======--
+
+-- criticita': se lo stt_agent si guasta, lo stato del dispositivo non e' disponibile
+CTLSPEC
+AG (stt_agent.stato = guasto -> !stato_visibile)
+
+-- tolleranza: lo stato del dispositivo puo' funzionare con lo stt_agent guasto
+CTLSPEC
+EF (stt_agent.stato = guasto & stato_visibile)
+
+-- criticita': se lo stt_agent si guasta, i moduli installati non sono disponibili
+CTLSPEC
+AG (stt_agent.stato = guasto -> !moduli_ok)
+
+-- tolleranza: i moduli installati possono funzionare con lo stt_agent guasto
+CTLSPEC
+EF (stt_agent.stato = guasto & moduli_ok)
+
+-- criticita': se lo stt_agent si guasta, i comandi non sono disponibili (atteso falso)
+CTLSPEC
+AG (stt_agent.stato = guasto -> !comando_ok)
+
+-- tolleranza: i comandi possono funzionare con lo stt_agent guasto (il device risulta offline, ma i comandi arrivano)
+CTLSPEC
+EF (stt_agent.stato = guasto & comando_ok)
+
+
+--======= KNX_LISTENER =======--
+
+-- criticita': se il knx_listener si guasta, il valore degli item non e' disponibile
+CTLSPEC
+AG (knx_listener.stato = guasto -> !valore_item_ok)
+
+-- tolleranza: il valore degli item puo' funzionare con il knx_listener guasto
+CTLSPEC
+EF (knx_listener.stato = guasto & valore_item_ok)
+
+-- criticita': se il knx_listener si guasta, gli aggiornamenti in tempo reale non sono disponibili
+CTLSPEC
+AG (knx_listener.stato = guasto -> !tempo_reale_ok)
+
+-- tolleranza: gli aggiornamenti in tempo reale possono funzionare con il knx_listener guasto
+CTLSPEC
+EF (knx_listener.stato = guasto & tempo_reale_ok)
+
+-- criticita': se il knx_listener si guasta, i comandi non sono disponibili (atteso falso)
+CTLSPEC
+AG (knx_listener.stato = guasto -> !comando_ok)
+
+-- tolleranza: i comandi possono funzionare con il knx_listener guasto (la luce cambia, ma il pannello non lo vede)
+CTLSPEC
+EF (knx_listener.stato = guasto & comando_ok)
+
+
+--======= COMMAND_AGENT =======--
+
+-- criticita': se il command_agent si guasta, i comandi non sono disponibili
+CTLSPEC
+AG (command_agent.stato = guasto -> !comando_ok)
+
+-- tolleranza: i comandi possono funzionare con il command_agent guasto
+CTLSPEC
+EF (command_agent.stato = guasto & comando_ok)
+
+-- criticita': se il command_agent si guasta, la conferma della configurazione non e' disponibile
+CTLSPEC
+AG (command_agent.stato = guasto -> !esito_ok)
+
+-- tolleranza: la conferma della configurazione puo' funzionare con il command_agent guasto
+CTLSPEC
+EF (command_agent.stato = guasto & esito_ok)
+
+-- criticita': se il command_agent si guasta, lo stato del dispositivo non e' disponibile (atteso falso)
+CTLSPEC
+AG (command_agent.stato = guasto -> !stato_visibile)
+
+-- tolleranza: lo stato del dispositivo puo' funzionare con il command_agent guasto (il device risulta online, ma i comandi non arrivano)
+CTLSPEC
+EF (command_agent.stato = guasto & stato_visibile)
 
 --======= GATEWAY =======--
 
