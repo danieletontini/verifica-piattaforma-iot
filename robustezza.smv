@@ -10,7 +10,7 @@ MODULE main
 VAR
 
 device          : componente;   -- dispositivo (Logic Machine)
-sst_agent       : componente;   -- agent del device che pubblica stato e telemetria (StateTelemetryAgent)
+stt_agent       : componente;   -- agent del device che pubblica stato e telemetria (StateTelemetryAgent)
 knx_listener    : componente;   -- agent del device che inoltra gli eventi del bus KNX
 command_agent   : componente;   -- agent del device che esegue i comandi
 gateway         : componente;   -- gateway KNX/IP
@@ -32,8 +32,7 @@ INVAR
   + toint(command_agent.stato != ok) + toint(gateway.stato != ok) + toint(broker.stato != ok)
   + toint(core.stato != ok) + toint(redis.stato != ok) + toint(state_agent.stato != ok)
   + toint(response_agent.stato != ok) + toint(event_agent.stato != ok) + toint(telemetry_agent.stato != ok)
-  + toint(reverb.stato != ok) + toint(provisioner.stato != ok) + toint(license_mgr.stato != ok)
-  + toint(pannello.stato != ok) <= 1;
+  + toint(reverb.stato != ok) + toint(provisioner.stato != ok) + toint(license_mgr.stato != ok) <= 1;
 
 -- funzioni del sistema
 
@@ -48,7 +47,7 @@ DEFINE esito_ok := core.stato != guasto & device.stato != guasto & broker.stato 
 
 -- F3 stato del dispositivo: device -> broker -> state_agent -> Redis -> Core -> pannello
 DEFINE stato_visibile := device.stato != guasto & broker.stato != guasto & state_agent.stato != guasto
-                       & redis.stato != guasto & core.stato != guasto & pannello.stato != guasto & sst_agent.stato != guasto;
+                       & redis.stato != guasto & core.stato != guasto & pannello.stato != guasto & stt_agent.stato != guasto;
 
 -- F4 valore degli item: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Redis -> Core -> pannello
 DEFINE valore_item_ok := gateway.stato != guasto & device.stato != guasto & broker.stato != guasto
@@ -61,7 +60,7 @@ DEFINE tempo_reale_ok := gateway.stato != guasto & device.stato != guasto & brok
 
 -- F6 moduli installati (telemetria): device -> broker -> telemetry_agent -> Redis -> Core
 DEFINE moduli_ok := device.stato != guasto & broker.stato != guasto & telemetry_agent.stato != guasto
-                  & redis.stato != guasto & core.stato != guasto & sst_agent.stato != guasto;
+                  & redis.stato != guasto & core.stato != guasto & stt_agent.stato != guasto;
 
 -- F7 provisioning: device -> Provisioner -> Core (database) e Provisioner -> broker (dynsec)
 DEFINE provisioning_ok := device.stato != guasto & provisioner.stato != guasto & core.stato != guasto
