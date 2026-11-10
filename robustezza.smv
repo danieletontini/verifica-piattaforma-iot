@@ -37,9 +37,9 @@ INVAR
 DEFINE comando_ok := pannello.stato != guasto & core.stato != guasto & broker.stato != guasto
                    & device.stato != guasto & gateway.stato != guasto;
 
--- F2 esito del comando: device (CommandAgent) -> broker -> response_agent -> Redis
--- (da verificare chi legge l'esito da Redis: il Core non e' ancora incluso)
-DEFINE esito_ok := device.stato != guasto & broker.stato != guasto & response_agent.stato != guasto
+-- F2 conferma della configurazione inviata ai device: (file JSON: utenti, zone, template):
+-- Core (invio) -> broker -> device (CommandAgent) -> broker -> response_agent -> Redis -> Core (RedisCommandResponses)
+DEFINE esito_ok := core.stato != guasto & device.stato != guasto & broker.stato != guasto & response_agent.stato != guasto
                  & redis.stato != guasto;
 
 -- F3 stato del dispositivo: device -> broker -> state_agent -> Redis -> Core -> pannello
@@ -240,6 +240,14 @@ AG (core.stato = guasto -> !stato_visibile)
 -- tolleranza: lo stato del dispositivo puo' funzionare con il Core guasto
 CTLSPEC
 EF (core.stato = guasto & stato_visibile)
+
+-- criticita': se il Core si guasta, la conferma della configurazione non e' disponibile
+CTLSPEC
+AG (core.stato = guasto -> !esito_ok)
+
+-- tolleranza: la conferma della configurazione puo' funzionare con il Core guasto
+CTLSPEC
+EF (core.stato = guasto & esito_ok)
 
 -- criticita': se il Core si guasta, il valore degli item non e' disponibile
 CTLSPEC
