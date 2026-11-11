@@ -1,0 +1,14 @@
+-- Modello di robustezza della piattaforma IoT per la building automation
+-- In questo file sono rappresentati i vari stati che gli agent attraversano 
+-- Per verificare se il sistema si riprende da solo dopo un guasto di un determinato componente
+-- Nota: file da unire con robustezza.smv in seguito
+
+MODULE main
+--Attualmente sono pesenti solo i 5 componenti per il funzionamento del commandAgent
+VAR
+
+device          : componente;  -- dispositivo (Logic Machine)
+command_agent   : componente;   -- agent del device che esegue i comandi
+provisioner     : componente;   -- consegna le credenziali ai device
+core            : componente;   -- Core con il suo database
+broker          : componente;   -- broker MQTT

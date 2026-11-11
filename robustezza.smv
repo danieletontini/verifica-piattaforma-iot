@@ -1,5 +1,5 @@
 -- Modello di robustezza della piattaforma IoT per la building automation
--- Passo 1: versione astratta
+-- versione astratta
 -- Ogni componente puo' essere: ok, guasto (guasto silenzioso), compromesso (guasto bizantino)
 -- Al massimo un componente alla volta non e' ok
 -- Una funzione del sistema e' disponibile se nessuno dei componenti necessari e' guasto
