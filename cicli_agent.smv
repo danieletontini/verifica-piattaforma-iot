@@ -7,8 +7,97 @@ MODULE main
 --Attualmente sono pesenti solo i 5 componenti per il funzionamento del commandAgent
 VAR
 
-device          : componente;  -- dispositivo (Logic Machine)
-command_agent   : componente;   -- agent del device che esegue i comandi
+device          : componente;   -- dispositivo (Logic Machine)
+command_agent   : ciclo_command_agent(device, provisioner, core, broker);   -- agent del device che esegue i comandi
 provisioner     : componente;   -- consegna le credenziali ai device
 core            : componente;   -- Core con il suo database
 broker          : componente;   -- broker MQTT
+
+-- al massimo un componente non funzionante alla volta (come in robustezza.smv)
+INVAR toint(device.stato != funzionante) + toint(command_agent.stato != funzionante)
+    + toint(provisioner.stato != funzionante) + toint(core.stato != funzionante)
+    + toint(broker.stato != funzionante) <= 1
+
+-- fairness: ogni componente prima o poi torna a funzionare
+JUSTICE device.stato = funzionante
+JUSTICE command_agent.stato = funzionante
+JUSTICE provisioner.stato = funzionante
+JUSTICE core.stato = funzionante
+JUSTICE broker.stato = funzionante
+
+
+--======= COMMAND AGENT =======--
+
+-- ripresa: dopo un guasto del broker, l'agent torna sempre operativo
+-- (atteso falso: se il broker va e viene, l'agent lo rincorre per sempre)
+CTLSPEC AG (broker.stato = guasto -> AF command_agent.fase = operativo)
+
+-- ripresa con stabilita': se prima o poi i componenti smettono di guastarsi,
+-- l'agent torna operativo (atteso vero)
+LTLSPEC (F G device.stato = funzionante & F G command_agent.stato = funzionante
+       & F G provisioner.stato = funzionante & F G core.stato = funzionante
+       & F G broker.stato = funzionante)
+        -> G (broker.stato = guasto -> F command_agent.fase = operativo)
+
+-- stallo: l'agent puo' restare per sempre nel provisioning
+-- (atteso vero: Provisioner e Core che si guastano a turno)
+CTLSPEC EF EG command_agent.fase = provisioning
+
+-- dipendenza nascosta: broker funzionante ma agent fermo al provisioning
+-- (atteso vero)
+CTLSPEC EF (broker.stato = funzionante & command_agent.fase = provisioning)
+
+-- finestra di rilevamento: l'agent e' operativo ma il broker e' gia' guasto
+-- (atteso falso: nel sistema reale la finestra dura fino al keepalive, 60 s)
+CTLSPEC AG (command_agent.fase = operativo -> broker.stato != guasto)
+
+-- riavvio: se il device si guasta, l'agent riparte dal provisioning
+-- (atteso vero)
+CTLSPEC AG (device.stato = guasto -> AX command_agent.fase = provisioning)
+
+
+--======= MODELLO DEL COMPONENTE =======--
+MODULE componente
+
+VAR
+stato : {funzionante, guasto, compromesso};
+
+ASSIGN
+init(stato) := funzionante;
+next(stato) := {funzionante, guasto, compromesso};
+
+
+--======= MODELLO DEL COMMAND AGENT =======--
+-- fasi del ciclo (main.php, classe DeviceSimulator):
+--   provisioning = CLOUD_SYNC   (richiesta credenziali al Provisioner)
+--   connessione  = MQTT_CONNECT (connessione al broker)
+--   operativo    = RUN          (riceve i comandi dal broker)
+-- lo stato BOOT e' stato omesso: fa solo una stampa e passa subito a CLOUD_SYNC
+MODULE ciclo_command_agent(device, provisioner, core, broker)
+
+VAR
+stato : {funzionante, guasto, compromesso};   -- il processo dell'agent
+fase  : {provisioning, connessione, operativo};
+
+ASSIGN
+init(stato) := funzionante;
+next(stato) := {funzionante, guasto, compromesso};
+
+init(fase) := provisioning;
+next(fase) :=
+case
+  -- riavvio del device o del processo: si riparte da BOOT, quindi dal provisioning
+  device.stato = guasto | stato = guasto                    : provisioning;
+  -- provisioning: getCredentials al Provisioner, che interroga il Core
+  fase = provisioning & provisioner.stato != guasto
+                      & core.stato != guasto                : connessione;
+  fase = provisioning                                       : provisioning;   -- fallito: riprova dopo 10 s
+  -- connessione al broker
+  fase = connessione & broker.stato != guasto               : operativo;
+  fase = connessione                                        : {connessione, provisioning};  -- riprova dopo 5 s, o dopo MAX_MQTT_RETRY torna al provisioning
+  -- operativo: loop(true); un errore (es. broker guasto) riporta al provisioning
+  fase = operativo & broker.stato = guasto                  : provisioning;
+  TRUE                                                      : fase;
+esac;
+
+
