@@ -8,7 +8,8 @@ MODULE main
 VAR
 
 device          : componente;   -- dispositivo (Logic Machine)
-command_agent   : ciclo_command_agent(device, provisioner, core, broker);   -- agent del device che esegue i comandi
+command_agent   : ciclo_agent(device, provisioner, core, broker); -- agent del device che esegue i comandi
+sst_agent       : ciclo_agent(device, provisioner, core, broker); -- agent del dev che pubblica la telemetria
 provisioner     : componente;   -- consegna le credenziali ai device
 core            : componente;   -- Core con il suo database
 broker          : componente;   -- broker MQTT
@@ -21,6 +22,7 @@ INVAR toint(device.stato != funzionante) + toint(command_agent.stato != funziona
 -- fairness: ogni componente prima o poi torna a funzionare
 JUSTICE device.stato = funzionante
 JUSTICE command_agent.stato = funzionante
+JUSTICE sst_agent.stato = funzionante
 JUSTICE provisioner.stato = funzionante
 JUSTICE core.stato = funzionante
 JUSTICE broker.stato = funzionante
@@ -100,4 +102,11 @@ case
   TRUE                                                      : fase;
 esac;
 
+--======= MODELLO DELLO STATE TELEMETRY AGENT =======-- 
 
+
+MODULE ciclo_stt_agent
+
+VAR
+stato :{funzionante, gusto, compromesso};
+fase  :{}
