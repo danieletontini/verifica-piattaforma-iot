@@ -1,36 +1,49 @@
 -- Modello di robustezza della piattaforma IoT per la building automation
--- In questo file sono rappresentati i vari stati che gli agent attraversano 
--- Per verificare se il sistema si riprende da solo dopo un guasto di un determinato componente
+-- In questo file sono rappresentati gli stati che gli agent attraversano,
+-- per verificare se il sistema si riprende da solo dopo il guasto di un componente.
+-- Contiene anche il riavvio da remoto degli agent (meccanismo previsto, non ancora
+-- implementato), modellato come ipotesi con la FROZENVAR riavvio_remoto.
 -- Nota: file da unire con robustezza.smv in seguito
 
 MODULE main
 
-VAR
+FROZENVAR
+riavvio_remoto  : boolean;      -- ipotesi: gli agent del device possono essere riavviati dal cloud
+                                -- (NuSMV verifica entrambi gli scenari: con e senza il meccanismo)
 
+VAR
 device          : componente;   -- dispositivo (Logic Machine)
-command_agent   : ciclo_agent(device, provisioner, core, broker); -- agent del device che esegue i comandi
-stt_agent       : ciclo_agent(device, provisioner, core, broker); -- agent del device che pubblica la telemetria
-knx_listener    : ciclo_knx_listener(device, provisioner, core, broker, gateway); -- agent del device che inoltra gli eventi del bus KNX
+command_agent   : ciclo_agent(device, provisioner, core, broker, riavvio_remoto, gestore_riavvio);  -- agent del device che esegue i comandi
+stt_agent       : ciclo_agent(device, provisioner, core, broker, riavvio_remoto, gestore_riavvio);  -- agent del device che pubblica stato e telemetria
+knx_listener    : ciclo_knx_listener(device, provisioner, core, broker, gateway, riavvio_remoto, gestore_riavvio);  -- agent del device che inoltra gli eventi del bus KNX
 provisioner     : componente;   -- consegna le credenziali ai device
 core            : componente;   -- Core con il suo database
 broker          : componente;   -- broker MQTT
 gateway         : componente;   -- gateway KNX/IP
+gestore_riavvio : componente;   -- componente a bordo che riceve ed esegue il riavvio da remoto
+                                -- (ipotesi: distinto dagli agent; da chiarire con il tutor)
 
--- al massimo un componente non funzionante alla volta 
+-- al massimo due componenti non funzionanti alla volta: con uno solo, la dipendenza
+-- del riavvio da remoto da broker, Core e gestore non emergerebbe mai
 INVAR toint(device.stato != funzionante) + toint(command_agent.stato != funzionante)
+    + toint(stt_agent.stato != funzionante) + toint(knx_listener.stato != funzionante)
     + toint(provisioner.stato != funzionante) + toint(core.stato != funzionante)
-    + toint(broker.stato != funzionante)  + toint(stt_agent.stato != funzionante)
-    + toint(knx_listener.stato != funzionante) + toint(gateway.stato != funzionante)<= 1
+    + toint(broker.stato != funzionante) + toint(gateway.stato != funzionante)
+    + toint(gestore_riavvio.stato != funzionante) <= 2
 
--- fairness: ogni componente prima o poi torna a funzionare
+-- fairness dei componenti: prima o poi tornano a funzionare
 JUSTICE device.stato = funzionante
-JUSTICE command_agent.stato = funzionante
-JUSTICE stt_agent.stato = funzionante
 JUSTICE provisioner.stato = funzionante
 JUSTICE core.stato = funzionante
 JUSTICE broker.stato = funzionante
 JUSTICE gateway.stato = funzionante
-JUSTICE knx_listener.stato = funzionante
+JUSTICE gestore_riavvio.stato = funzionante
+
+-- fairness degli agent: se la catena del riavvio resta disponibile, prima o poi il riavvio arriva
+-- (senza riavvio da remoto non c'e' nessuna garanzia: un agent bloccato puo' restarlo per sempre)
+JUSTICE command_agent.stato != guasto | !command_agent.puo_essere_riavviato
+JUSTICE stt_agent.stato != guasto     | !stt_agent.puo_essere_riavviato
+JUSTICE knx_listener.stato != guasto  | !knx_listener.puo_essere_riavviato
 
 
 --======= COMMAND AGENT =======--
@@ -69,14 +82,16 @@ CTLSPEC EF (command_agent.fase = operativo & EX broker.stato = guasto
 -- (atteso falso: nel sistema reale la finestra dura fino al keepalive, 60 s)
 CTLSPEC AG (command_agent.fase = operativo -> broker.stato != guasto)
 
--- riavvio: se il device si guasta, l'agent riparte dal provisioning
+-- riavvio del device: se il device si guasta, l'agent riparte dal provisioning
 -- (atteso vero)
 CTLSPEC AG (device.stato = guasto -> AX command_agent.fase = provisioning)
+
 
 --======= RELAZIONE FRA GLI AGENT =======--
 -- le proprieta' del singolo agent sono scritte solo per command_agent:
 -- stt_agent usa lo stesso ciclo e dipende dagli stessi componenti,
--- quindi i risultati sono identici
+-- quindi i risultati sono identici (simmetria, come per a, b, c nel modello del treno)
+
 -- ingannevole: il device risulta online ma non riceve i comandi
 -- (atteso vero)
 CTLSPEC EF (stt_agent.fase = operativo & command_agent.fase != operativo)
@@ -85,22 +100,59 @@ CTLSPEC EF (stt_agent.fase = operativo & command_agent.fase != operativo)
 -- (atteso vero)
 CTLSPEC EF (command_agent.fase = operativo & stt_agent.fase != operativo)
 
+
 --======= KNX LISTENER =======--
--- correttezza del modello: fuori dalla fase RUN il tunnel knx non esiste (atteso vero)
+
+-- correttezza del modello: fuori da RUN il tunnel KNX non esiste (atteso vero)
 CTLSPEC AG (knx_listener.fase != operativo -> knx_listener.collegamento_knx = perso)
 
 -- ripresa: il collegamento perso torna sempre attivo? (atteso falso)
 CTLSPEC AG (knx_listener.collegamento_knx = perso -> AF knx_listener.collegamento_knx = attivo)
 
--- disallineamento: listener operativo, gateway funzionante, ma nessun evento dal bus (atteso vero)
+-- disallineamento: listener operativo, gateway funzionante, ma nessun evento dal bus
+-- (atteso vero)
 CTLSPEC EF (knx_listener.fase = operativo & knx_listener.collegamento_knx = perso
             & gateway.stato = funzionante)
 
--- ...e puo' durare per sempre (atteso vero)
+-- disallineamento permanente: e' possibile arrivare a una situazione in cui, per sempre,
+-- il listener e' operativo (in RUN, connesso al broker) e il gateway funziona,
+-- ma il tunnel KNX e' perso: nessun telegramma del bus arriva piu' al Core,
+-- quindi il pannello non vede i cambiamenti fatti dagli interruttori fisici
+-- (atteso vero: dopo un'interruzione del gateway il tunnel puo' non riaprirsi mai)
 CTLSPEC EF EG (knx_listener.fase = operativo & knx_listener.collegamento_knx = perso
                & gateway.stato = funzionante)
 
+
+--======= RIAVVIO DA REMOTO =======--
+-- il meccanismo vale per tutti e tre gli agent del device; le proprieta' sono scritte
+-- per il CommandAgent, il piu' critico (se si blocca non si possono piu' inviare comandi).
+-- Per StateTelemetryAgent e KNX listener i risultati sono gli stessi (verificati).
+
+-- senza riavvio da remoto, il CommandAgent puo' bloccarsi e non tornare mai piu' operativo:
+-- su quell'impianto non si possono piu' inviare comandi (atteso vero)
+CTLSPEC !riavvio_remoto -> EF AG command_agent.fase != operativo
+
+-- con il riavvio da remoto, da qualunque situazione il CommandAgent puo' sempre
+-- tornare operativo (atteso vero)
+CTLSPEC riavvio_remoto -> AG EF command_agent.fase = operativo
+
+-- senza riavvio da remoto questo non vale (atteso falso)
+CTLSPEC !riavvio_remoto -> AG EF command_agent.fase = operativo
+
+-- il riavvio dipende dalla catena: se l'agent e' bloccato e il broker e' guasto,
+-- in quel momento non puo' essere riavviato (atteso vero)
+CTLSPEC riavvio_remoto -> AG ((command_agent.stato = guasto & broker.stato = guasto)
+                              -> AX command_agent.stato = guasto)
+
+-- anche con il broker funzionante, l'agent puo' restare bloccato per sempre
+-- se Core e gestore del riavvio si guastano a turno (atteso vero)
+CTLSPEC riavvio_remoto -> EF EG (command_agent.stato = guasto & broker.stato = funzionante)
+
+
 --======= MODELLO DEL COMPONENTE =======--
+-- stampo per i componenti che hanno solo uno stato (device, Provisioner, Core, broker,
+-- gateway, gestore del riavvio): possono funzionare, guastarsi (guasto silenzioso)
+-- o essere compromessi (guasto bizantino; per ora si comporta come funzionante)
 MODULE componente
 
 VAR
@@ -110,51 +162,105 @@ ASSIGN
 init(stato) := funzionante;
 next(stato) := {funzionante, guasto, compromesso};
 
---======= MODELLO KNX_LISTENER =======--
-MODULE ciclo_knx_listener(device, provisioner, core, broker, gateway)
+
+--======= MODELLO DEL CICLO DEL KNX LISTENER =======--
+-- stesso ciclo degli altri agent (main.php), con una differenza in RUN:
+--   provisioning = CLOUD_SYNC   (richiesta credenziali al Provisioner)
+--   connessione  = MQTT_CONNECT (connessione al broker)
+--   operativo    = RUN          (tunnel KNXnet/IP aperto verso il gateway, inoltra gli eventi al broker)
+-- lo stato BOOT e' stato omesso: fa solo una stampa e passa subito a CLOUD_SYNC
+-- l'ingresso in RUN comprende l'apertura del tunnel: se il gateway e' guasto, connect() fallisce
+-- e si torna al provisioning (catch esterno) senza essere mai stati operativi
+-- un guasto del gateway durante RUN non cambia la fase (try interno): lo rappresenta collegamento_knx
+MODULE ciclo_knx_listener(device, provisioner, core, broker, gateway, riavvio_remoto, gestore_riavvio)
 
 VAR
-stato : {funzionante, guasto, compromesso};
-fase  : {provisioning, connessione, operativo};
-collegamento_knx : {attivo, perso};
+stato            : {funzionante, guasto, compromesso};   -- il processo del listener
+fase             : {provisioning, connessione, operativo};
+collegamento_knx : {attivo, perso};                      -- tunnel KNXnet/IP (UDP) fra il listener e il gateway
 
+-- il riavvio da remoto richiede tutta la catena: il Core che rileva il blocco e invia il comando,
+-- il broker che lo consegna, il gestore a bordo che lo esegue
+DEFINE puo_essere_riavviato := riavvio_remoto & broker.stato != guasto
+                             & core.stato != guasto & gestore_riavvio.stato != guasto;
 
 ASSIGN
 init(stato) := funzionante;
-next(stato) := {funzionante,guasto,compromesso};
-
-init(fase)  := provisioning;
-next(fase)  :=
+next(stato) :=
 case
+  -- processo bloccato e catena disponibile: il riavvio puo' arrivare
+  stato = guasto & puo_essere_riavviato                                   : {guasto, funzionante};
+  -- processo bloccato e nessuno puo' riavviarlo: resta bloccato
+  stato = guasto                                                          : guasto;
+  -- altrimenti lo stato e' libero
+  TRUE                                                                    : {funzionante, guasto, compromesso};
+esac;
 
-device.stato = guasto | stato = guasto                                    : provisioning;  -- riavvio del device o del processo: si riparte dal provisioning
--- provisioning: getCredentials al provisioner che interroga il Core
-fase = provisioning & provisioner.stato != guasto & core.stato != guasto  : connessione;  --provisoning andato a buon fine passo a connessione
-fase = provisioning                                                       : provisioning;
-fase = connessione & broker.stato != guasto & gateway.stato != guasto     : operativo;    -- si passa operativi se broker e gataway funzionano
-fase = connessione  & broker.stato != guasto                              : provisioning; -- quando il gateway non funziona si torna al provisoning                                                     : provisioning;
-fase = connessione                                                        : {connessione,provisioning}; -- broker guasto: riprova dopo 5 s, o dopo MAX_MQTT_RETRY torna al provisioning
-fase = operativo & broker.stato = guasto                                  : provisioning;
-TRUE                                                                      : fase;
+init(fase) := provisioning;
+next(fase) :=
+case
+  -- riavvio del device o del processo: si riparte da BOOT, quindi dal provisioning
+  device.stato = guasto | stato = guasto                                  : provisioning;
+  -- provisioning: getCredentials al Provisioner, che interroga il Core
+  fase = provisioning & provisioner.stato != guasto
+                      & core.stato != guasto                              : connessione;
+  fase = provisioning                                                     : provisioning;   -- fallito: riprova dopo 10 s
+  -- connessione al broker, poi apertura del tunnel verso il gateway
+  fase = connessione & broker.stato != guasto
+                     & gateway.stato != guasto                            : operativo;
+  fase = connessione & broker.stato != guasto                             : provisioning;   -- gateway guasto: connect() fallisce
+  fase = connessione                                                      : {connessione, provisioning};  -- broker guasto: riprova dopo 5 s, o dopo MAX_MQTT_RETRY torna al provisioning
+  -- operativo: broker guasto -> catch esterno -> provisioning
+  fase = operativo & broker.stato = guasto                                : provisioning;
+  -- altrimenti resta dove sei (anche operativo con il gateway guasto: try interno)
+  TRUE                                                                    : fase;
+esac;
+
+init(collegamento_knx) := perso;          -- all'avvio il tunnel non c'e' ancora
+next(collegamento_knx) :=
+case
+  -- fuori da RUN il tunnel non esiste (resetStates() lo chiude)
+  next(fase) != operativo                                                 : perso;
+  -- entrata in RUN: connect() al gateway riuscito
+  fase != operativo & next(fase) = operativo                              : attivo;
+  -- il gateway cade mentre il tunnel e' aperto
+  collegamento_knx = attivo & gateway.stato = guasto                      : perso;
+  -- il gateway e' tornato: il tunnel puo' riprendersi oppure no
+  -- (unica scelta libera: perdita rilevata o silenziosa, da raffinare)
+  collegamento_knx = perso & gateway.stato != guasto                      : {attivo, perso};
+  -- altrimenti resta com'e'
+  TRUE                                                                    : collegamento_knx;
 esac;
 
 
 --======= MODELLO DEL CICLO DEGLI AGENT =======--
---il ciclo è identico per gli agent Command e Telemetry 
--- fasi del ciclo (main.php):
+-- il ciclo e' identico per CommandAgent e StateTelemetryAgent (verificato sui due main.php):
 --   provisioning = CLOUD_SYNC   (richiesta credenziali al Provisioner)
 --   connessione  = MQTT_CONNECT (connessione al broker)
---   operativo    = RUN          (scambia messaggi col broker)
+--   operativo    = RUN          (scambia messaggi con il broker)
 -- lo stato BOOT e' stato omesso: fa solo una stampa e passa subito a CLOUD_SYNC
-MODULE ciclo_agent(device, provisioner, core, broker)
+MODULE ciclo_agent(device, provisioner, core, broker, riavvio_remoto, gestore_riavvio)
 
 VAR
 stato : {funzionante, guasto, compromesso};   -- il processo dell'agent
 fase  : {provisioning, connessione, operativo};
 
+-- il riavvio da remoto richiede tutta la catena: il Core che rileva il blocco e invia il comando,
+-- il broker che lo consegna, il gestore a bordo che lo esegue
+DEFINE puo_essere_riavviato := riavvio_remoto & broker.stato != guasto
+                             & core.stato != guasto & gestore_riavvio.stato != guasto;
+
 ASSIGN
 init(stato) := funzionante;
-next(stato) := {funzionante, guasto, compromesso};
+next(stato) :=
+case
+  -- processo bloccato e catena disponibile: il riavvio puo' arrivare
+  stato = guasto & puo_essere_riavviato                     : {guasto, funzionante};
+  -- processo bloccato e nessuno puo' riavviarlo: resta bloccato
+  stato = guasto                                            : guasto;
+  -- altrimenti lo stato e' libero
+  TRUE                                                      : {funzionante, guasto, compromesso};
+esac;
 
 init(fase) := provisioning;
 next(fase) :=
@@ -172,4 +278,3 @@ case
   fase = operativo & broker.stato = guasto                  : provisioning;
   TRUE                                                      : fase;
 esac;
-
