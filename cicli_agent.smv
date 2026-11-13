@@ -85,6 +85,21 @@ CTLSPEC EF (stt_agent.fase = operativo & command_agent.fase != operativo)
 -- (atteso vero)
 CTLSPEC EF (command_agent.fase = operativo & stt_agent.fase != operativo)
 
+--======= KNX LISTENER =======--
+-- correttezza del modello: fuori dalla fase RUN il tunnel knx non esiste (atteso vero)
+CTLSPEC AG (knx_listener.fase != operativo -> knx_listener.collegamento_knx = perso)
+
+-- ripresa: il collegamento perso torna sempre attivo? (atteso falso)
+CTLSPEC AG (knx_listener.collegamento_knx = perso -> AF knx_listener.collegamento_knx = attivo)
+
+-- disallineamento: listener operativo, gateway funzionante, ma nessun evento dal bus (atteso vero)
+CTLSPEC EF (knx_listener.fase = operativo & knx_listener.collegamento_knx = perso
+            & gateway.stato = funzionante)
+
+-- ...e puo' durare per sempre (atteso vero)
+CTLSPEC EF EG (knx_listener.fase = operativo & knx_listener.collegamento_knx = perso
+               & gateway.stato = funzionante)
+
 --======= MODELLO DEL COMPONENTE =======--
 MODULE componente
 
@@ -101,7 +116,7 @@ MODULE ciclo_knx_listener(device, provisioner, core, broker, gateway)
 VAR
 stato : {funzionante, guasto, compromesso};
 fase  : {provisioning, connessione, operativo};
---collegamento_knx : {attivo, perso};
+collegamento_knx : {attivo, perso};
 
 
 ASSIGN
