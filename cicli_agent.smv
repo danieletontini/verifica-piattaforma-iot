@@ -10,7 +10,7 @@ VAR
 device          : componente;   -- dispositivo (Logic Machine)
 command_agent   : ciclo_agent(device, provisioner, core, broker); -- agent del device che esegue i comandi
 stt_agent       : ciclo_agent(device, provisioner, core, broker); -- agent del device che pubblica la telemetria
-knx_listener    : ciclo_knx_listner(device, provisioner, core, broker, gateway);
+knx_listener    : ciclo_knx_listener(device, provisioner, core, broker, gateway); -- agent del device che inoltra gli eventi del bus KNX
 provisioner     : componente;   -- consegna le credenziali ai device
 core            : componente;   -- Core con il suo database
 broker          : componente;   -- broker MQTT
@@ -50,9 +50,20 @@ LTLSPEC (F G device.stato = funzionante & F G command_agent.stato = funzionante
 -- (atteso vero: Provisioner e Core che si guastano a turno)
 CTLSPEC EF EG command_agent.fase = provisioning
 
--- dipendenza nascosta: broker funzionante ma agent fermo al provisioning
--- (atteso vero)
-CTLSPEC EF (broker.stato = funzionante & command_agent.fase = provisioning)
+-- dipendenza nascosta: con il broker funzionante, se il Provisioner e' guasto
+-- l'agent in provisioning non riesce a ripartire (atteso vero)
+CTLSPEC AG ((command_agent.fase = provisioning & broker.stato = funzionante
+            & provisioner.stato = guasto) -> AX command_agent.fase = provisioning)
+
+-- l'agent puo' restare per sempre al provisioning con il broker sempre funzionante
+-- (atteso vero: Provisioner e Core che si guastano a turno)
+CTLSPEC EF EG (broker.stato = funzionante & command_agent.fase = provisioning)
+
+-- dopo essere stato operativo e aver perso il broker, l'agent puo' trovarsi fermo
+-- al provisioning con il broker tornato funzionante e il Provisioner guasto (atteso vero)
+CTLSPEC EF (command_agent.fase = operativo & EX broker.stato = guasto
+            & EF (broker.stato = funzionante & provisioner.stato = guasto
+                  & command_agent.fase = provisioning))
 
 -- finestra di rilevamento: l'agent e' operativo ma il broker e' gia' guasto
 -- (atteso falso: nel sistema reale la finestra dura fino al keepalive, 60 s)
@@ -90,7 +101,7 @@ MODULE ciclo_knx_listener(device, provisioner, core, broker, gateway)
 VAR
 stato : {funzionante, guasto, compromesso};
 fase  : {provisioning, connessione, operativo};
-collegamento_knx : {attivo, perso};
+--collegamento_knx : {attivo, perso};
 
 
 ASSIGN
@@ -100,17 +111,16 @@ next(stato) := {funzionante,guasto,compromesso};
 init(fase)  := provisioning;
 next(fase)  :=
 case
--- al riavvio del device si riparte deal provisioning
-device.stato = guasto | stato = guasto                 : provisioning; 
+
+device.stato = guasto | stato = guasto                                    : provisioning;  -- riavvio del device o del processo: si riparte dal provisioning
 -- provisioning: getCredentials al provisioner che interroga il Core
 fase = provisioning & provisioner.stato != guasto & core.stato != guasto  : connessione;  --provisoning andato a buon fine passo a connessione
-
 fase = provisioning                                                       : provisioning;
--- connessione : connessione al broker MQTT
-fase = connessione & broker.stato != guasto & gateway.stato != guasto     : operativo;
-
-fase = connessione                                                        : provisioning;
-TRUE                                                                      : false;
+fase = connessione & broker.stato != guasto & gateway.stato != guasto     : operativo;    -- si passa operativi se broker e gataway funzionano
+fase = connessione  & broker.stato != guasto                              : provisioning; -- quando il gateway non funziona si torna al provisoning                                                     : provisioning;
+fase = connessione                                                        : {connessione,provisioning}; -- broker guasto: riprova dopo 5 s, o dopo MAX_MQTT_RETRY torna al provisioning
+fase = operativo & broker.stato = guasto                                  : provisioning;
+TRUE                                                                      : fase;
 esac;
 
 
