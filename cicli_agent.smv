@@ -4,20 +4,23 @@
 -- Nota: file da unire con robustezza.smv in seguito
 
 MODULE main
---Attualmente sono pesenti solo i  componenti per il funzionamento del commandAgent
+
 VAR
 
 device          : componente;   -- dispositivo (Logic Machine)
 command_agent   : ciclo_agent(device, provisioner, core, broker); -- agent del device che esegue i comandi
 stt_agent       : ciclo_agent(device, provisioner, core, broker); -- agent del device che pubblica la telemetria
+knx_listener    : ciclo_knx_listner(device, provisioner, core, broker, gateway);
 provisioner     : componente;   -- consegna le credenziali ai device
 core            : componente;   -- Core con il suo database
 broker          : componente;   -- broker MQTT
+gateway         : componente;   -- gateway KNX/IP
 
--- al massimo un componente non funzionante alla volta (come in robustezza.smv)
+-- al massimo un componente non funzionante alla volta 
 INVAR toint(device.stato != funzionante) + toint(command_agent.stato != funzionante)
     + toint(provisioner.stato != funzionante) + toint(core.stato != funzionante)
-    + toint(broker.stato != funzionante)  + toint(stt_agent.stato != funzionante)<= 1
+    + toint(broker.stato != funzionante)  + toint(stt_agent.stato != funzionante)
+    + toint(knx_listener.stato != funzionante) + toint(gateway.stato != funzionante)<= 1
 
 -- fairness: ogni componente prima o poi torna a funzionare
 JUSTICE device.stato = funzionante
@@ -26,6 +29,8 @@ JUSTICE stt_agent.stato = funzionante
 JUSTICE provisioner.stato = funzionante
 JUSTICE core.stato = funzionante
 JUSTICE broker.stato = funzionante
+JUSTICE gateway.stato = funzionante
+JUSTICE knx_listener.stato = funzionante
 
 
 --======= COMMAND AGENT =======--
@@ -79,13 +84,42 @@ ASSIGN
 init(stato) := funzionante;
 next(stato) := {funzionante, guasto, compromesso};
 
+--======= MODELLO KNX_LISTENER =======--
+MODULE ciclo_knx_listener(device, provisioner, core, broker, gateway)
+
+VAR
+stato : {funzionante, guasto, compromesso};
+fase  : {provisioning, connessione, operativo};
+collegamento_knx : {attivo, perso};
+
+
+ASSIGN
+init(stato) := funzionante;
+next(stato) := {funzionante,guasto,compromesso};
+
+init(fase)  := provisioning;
+next(fase)  :=
+case
+-- al riavvio del device si riparte deal provisioning
+device.stato = guasto | stato = guasto                 : provisioning; 
+-- provisioning: getCredentials al provisioner che interroga il Core
+fase = provisioning & provisioner.stato != guasto & core.stato != guasto  : connessione;  --provisoning andato a buon fine passo a connessione
+
+fase = provisioning                                                       : provisioning;
+-- connessione : connessione al broker MQTT
+fase = connessione & broker.stato != guasto & gateway.stato != guasto     : operativo;
+
+fase = connessione                                                        : provisioning;
+TRUE                                                                      : false;
+esac;
+
 
 --======= MODELLO DEL CICLO DEGLI AGENT =======--
---il ciclo è identico per tutti gli agent presenti nel device
--- fasi del ciclo (main.php, classe DeviceSimulator):
+--il ciclo è identico per gli agent Command e Telemetry 
+-- fasi del ciclo (main.php):
 --   provisioning = CLOUD_SYNC   (richiesta credenziali al Provisioner)
 --   connessione  = MQTT_CONNECT (connessione al broker)
---   operativo    = RUN          (riceve i comandi dal broker)
+--   operativo    = RUN          (scambia messaggi col broker)
 -- lo stato BOOT e' stato omesso: fa solo una stampa e passa subito a CLOUD_SYNC
 MODULE ciclo_agent(device, provisioner, core, broker)
 
