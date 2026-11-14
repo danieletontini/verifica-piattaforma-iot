@@ -48,9 +48,11 @@ JUSTICE knx_listener.stato != guasto  | !knx_listener.puo_essere_riavviato
 
 --======= COMMAND AGENT =======--
 
--- ripresa: dopo un guasto del broker, l'agent torna sempre operativo
--- (atteso falso: se il broker va e viene, l'agent lo rincorre per sempre)
-CTLSPEC AG (broker.stato = guasto -> AF command_agent.fase = operativo)
+-- ripresa: con il riavvio da remoto, dopo un guasto del broker l'agent torna sempre operativo?
+-- (atteso falso: se i componenti vanno e vengono, l'agent li rincorre per sempre)
+-- limitata allo scenario con riavvio: senza, sarebbe falsa per il motivo banale
+-- dell'agent bloccato che nessuno riavvia
+CTLSPEC riavvio_remoto -> AG (broker.stato = guasto -> AF command_agent.fase = operativo)
 
 -- ripresa con stabilita': se prima o poi i componenti smettono di guastarsi,
 -- l'agent torna operativo (atteso vero)
