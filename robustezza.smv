@@ -1,14 +1,172 @@
--- Modello di robustezza della piattaforma IoT per la building automation
--- versione astratta
--- Ogni componente puo' essere: ok, guasto (guasto silenzioso), compromesso (guasto bizantino)
--- Al massimo un componente alla volta non e' ok
--- Una funzione del sistema e' disponibile se nessuno dei componenti necessari e' guasto
--- Il database e' incluso nel Core; gli agent del dispositivo sono inclusi nel device
+-- Modello di robustezza della piattaforma IoT per la building automation (versione astratta)
+-- Tesi di laurea triennale - Daniele Tontini
+-- Il focus sono i punti critici: per ogni componente, quali funzioni della piattaforma
+-- si perdono quando quel componente si guasta?
+--
+-- Componenti:
+--   device          = dispositivo (Logic Machine): hardware e rete
+--   stt_agent       = agent del device che pubblica stato e telemetria (StateTelemetryAgent)
+--   knx_listener    = agent del device che inoltra gli eventi del bus KNX
+--   command_agent   = agent del device che esegue i comandi (CommandAgent)
+--   gateway         = gateway KNX/IP
+--   broker          = broker MQTT
+--   core            = Core con il suo database
+--   redis           = Redis
+--   state_agent     = agent del core che scrive lo stato del dispositivo in Redis
+--   response_agent  = agent del core che riceve l'esito dei comandi (CommandResponseAgent)
+--   event_agent     = agent del core che riceve gli eventi KNX
+--   telemetry_agent = agent del core che riceve la telemetria
+--   reverb          = server WebSocket per il tempo reale
+--   provisioner     = consegna le credenziali ai device
+--   license_mgr     = License Manager
+--   pannello        = pannello web nel browser
+--
+-- Ingressi ambientali:
+--   lo stato di ogni componente (ok, guasto, compromesso) e' libero:
+--   i guasti possono comparire e sparire in qualunque momento
+--
+-- Ipotesi:
+--   modello di guasto: guasto = guasto silenzioso (il componente non risponde);
+--   compromesso = guasto bizantino, che per ora si comporta come ok
+--   al massimo un componente alla volta non e' ok (INVAR)
+--   una funzione e' disponibile se nessuno dei componenti sul suo percorso e' guasto
+--   i componenti non hanno comportamento interno: funzionano oppure no
+--   (il ciclo di riconnessione degli agent del device e' in cicli_agent.smv)
+--   il database e' incluso nel Core
+--   la copia locale delle licenze e' sempre valida
+--   non sono modellati i messaggi: una funzione e' disponibile o non lo e',
+--   senza distinguere il singolo comando, esito o evento
+--   Estensioni previste: vedi le sezioni "DA FARE" in fondo ai moduli e in fondo alle proprieta'
+--
+-- Le proprieta' sono numerate per funzione (F1 = comando, ..., F8 = licenze):
+--   [Fn-k] se il componente k si guasta, la funzione n non e' disponibile
+-- vero  = il componente e' un punto critico per quella funzione
+-- falso = non lo e': il controesempio mostra il componente guasto con la funzione disponibile
+-- Per ogni coppia componente-funzione c'e' una sola proprieta': la forma duale
+-- EF (componente guasto & funzione) e' la sua negazione e non aggiunge informazione
+-- Sono verificate solo le combinazioni significative: i componenti sul percorso della funzione
+-- e alcuni componenti fuori percorso, per mostrare situazioni ingannevoli
+--
+-- Matrice dei punti critici (X = critico, . = verificato non critico, vuoto = non verificato):
+--                   F1 F2 F3 F4 F5 F6 F7 F8
+--   device          X  X  X  X  X  X  X
+--   stt_agent       .     X        X
+--   knx_listener    .        X  X
+--   command_agent   X  X  .
+--   gateway         X     .  X  X
+--   broker          X  X  X  X  X  X  X
+--   core            X  X  X  X  .  X  X  X
+--   redis           .  X  X  X  .  X
+--   state_agent           X
+--   response_agent     X
+--   event_agent              X  X
+--   telemetry_agent                X
+--   reverb                   .  X
+--   provisioner     .     .           X
+--   license_mgr     .                    .
+--   pannello        X     X  X  X
 
+
+--======= MODELLO DEL COMPONENTE =======--
+-- stampo comune a tutti i componenti di questa versione astratta
+MODULE componente
+
+VAR
+-- stato del componente
+--   ok          = risponde correttamente
+--   guasto      = non risponde (guasto silenzioso)
+--   compromesso = risponde in modo scorretto (guasto bizantino)
+stato : {ok, guasto, compromesso};
+
+ASSIGN
+init(stato) := ok;                         -- all'avvio tutto funziona
+
+next(stato) := {ok, guasto, compromesso};  -- i guasti compaiono e spariscono liberamente
+
+
+--------------------------------------------------------------------------
+-- DA FARE: MODULI DEI PASSI SUCCESSIVI
+-- Le sezioni che seguono contengono solo commenti: indicano dove andranno i moduli
+-- che sostituiranno "componente" per i componenti con un comportamento interno,
+-- e cosa devono rappresentare. Ordine consigliato: 1, 2, 3, 4, 5.
+--------------------------------------------------------------------------
+
+--======= MODELLO DEL CICLO DEGLI AGENT DEL DEVICE (DA FARE: 1) =======--
+-- gia' scritto in cicli_agent.smv: moduli ciclo_agent e ciclo_knx_listener
+-- (fasi provisioning, connessione, operativo; collegamento_knx; riavvio da remoto).
+-- Per unirlo qui:
+--   copiare i due moduli sotto "componente" (dopo aver rinominato ok in funzionante);
+--   in main: command_agent e stt_agent diventano ciclo_agent(...),
+--            knx_listener diventa ciclo_knx_listener(...);
+--   nei DEFINE delle funzioni: "command_agent.stato != guasto" diventa
+--            "command_agent.fase = operativo" (lo stesso per stt_agent e knx_listener;
+--            per F4 e F5 anche knx_listener.collegamento_knx = attivo);
+--   aggiungere le JUSTICE e decidere l'INVAR (<= 1 oppure <= 2).
+-- Risultato atteso: Provisioner e Core diventano critici anche per comando, stato e valori,
+-- durante la ripresa dopo un guasto.
+
+--======= MODELLO DEGLI AGENT DEL CORE (DA FARE: 4) =======--
+-- oggi sono "componente". Dal codice (07_Agent nel vault):
+--   response_agent  : si riconnette e si risottoscrive da solo -> fase {connessione, operativo}
+--   state_agent     : alla caduta del broker termina sempre    -> fase {operativo, terminato}
+--   telemetry_agent : come state_agent
+--   event_agent     : resta connesso senza sottoscrizioni oppure termina
+--                                                               -> fase {operativo, sordo, terminato}
+-- Ipotesi da rendere esplicita con una FROZENVAR (es. riavvio_agent_core): un processo
+-- terminato viene riavviato? Il caso "sordo" non viene riavviato in nessuno dei due scenari.
+-- Per i messaggi (passo 2 e 3) basta "componente": questo modulo serve per la ripresa.
+
+--======= MODELLO DEI MESSAGGI (DA FARE: 2) =======--
+-- indicazione del relatore: modellare messaggi che possono essere persi o alterati.
+-- Un modulo per messaggio, sul modello di snd_synch nel modello del treno. Schema:
+--
+--   MODULE messaggio(mittente_pronto, percorso_ok, destinatario_pronto)
+--   VAR
+--   -- esito del messaggio
+--   --   nessuno    = nessun messaggio in corso
+--   --   consegnato = arrivato al destinatario
+--   --   perso      = non arrivato (guasto silenzioso di un tratto del percorso)
+--   --   alterato   = arrivato con contenuto diverso (guasto bizantino di un tratto)
+--   esito : {nessuno, consegnato, perso, alterato};
+--
+-- Un messaggio si perde se il mittente non e' operativo, se un componente del percorso
+-- e' guasto, se il destinatario non e' in ascolto (sessione pulita, PUBLISH di Redis),
+-- oppure per scelta non deterministica sui tratti senza garanzia di consegna (QoS 0).
+-- Si altera solo se un componente del percorso e' compromesso e il tratto e' in chiaro
+-- (MQTT sulla 1883, KNX); sui tratti TLS si assume solo la perdita.
+-- Messaggi, in ordine di priorita' (tabella M1-M8 in NuSMV_Comportamenti_e_Messaggi):
+--   M1 comando      : Core -> broker -> command_agent
+--   M2 esito        : command_agent -> broker -> response_agent -> Redis -> Core
+--   M3 stato        : stt_agent -> broker -> state_agent -> Redis (scade dopo 30 s)
+--   M4 evento KNX   : knx_listener -> broker -> event_agent -> Redis e Reverb
+-- Da decidere con i messaggi: composizione asincrona (variabile scheduler), perche'
+-- qui piu' componenti scrivono lo stesso dato e l'ordine degli eventi conta.
+
+--======= MODELLO DELL'AMBIENTE FISICO (DA FARE: 3) =======--
+-- serve a mostrare direttamente il disallineamento fra impianto e pannello. Schema:
+--
+--   VAR
+--   luce_reale    : boolean;   -- stato vero della luce sul bus KNX
+--   luce_pannello : boolean;   -- stato mostrato nel pannello (ultimo valore arrivato in Redis)
+--   interruttore  : boolean;   -- ingresso ambientale libero: qualcuno preme l'interruttore fisico
+--
+--   luce_reale cambia per un comando consegnato (M1) oppure per l'interruttore fisico;
+--   luce_pannello segue luce_reale solo se l'evento KNX (M4) viene consegnato.
+-- Proprieta' da scrivere (vedi "DISALLINEAMENTO" in fondo al file).
+
+--======= MODELLO DI REDIS E DEL BROKER (DA FARE: 5) =======--
+-- oggi sono "componente". Comportamenti che contano per gli altri componenti:
+--   redis  : la chiave dello stato scade dopo 30 s senza aggiornamenti (M3) -> {presente, scaduto};
+--            PUBLISH non conserva i messaggi: si perdono se nessuno e' in ascolto (M2)
+--   broker : sessione pulita (i messaggi per un client scollegato si perdono);
+--            Last Will dello StateTelemetryAgent (pubblica "offline" alla disconnessione)
+-- Da modellare insieme ai messaggi che li attraversano, non prima.
+
+
+--======= MAIN =======--
 MODULE main
 
 VAR
-
 device          : componente;   -- dispositivo (Logic Machine)
 stt_agent       : componente;   -- agent del device che pubblica stato e telemetria (StateTelemetryAgent)
 knx_listener    : componente;   -- agent del device che inoltra gli eventi del bus KNX
@@ -26,7 +184,8 @@ provisioner     : componente;   -- consegna le credenziali ai device
 license_mgr     : componente;   -- License Manager
 pannello        : componente;   -- pannello web nel browser
 
--- ipotesi di guasto: al massimo un componente non e' ok
+-- ipotesi di guasto: al massimo un componente non e' ok; cosi' ogni risultato indica
+-- l'effetto del guasto di un singolo componente (punto critico)
 INVAR
   toint(device.stato != ok) + toint(pannello.stato != ok) + toint(stt_agent.stato != ok) + toint(knx_listener.stato != ok)
   + toint(command_agent.stato != ok) + toint(gateway.stato != ok) + toint(broker.stato != ok)
@@ -34,558 +193,355 @@ INVAR
   + toint(response_agent.stato != ok) + toint(event_agent.stato != ok) + toint(telemetry_agent.stato != ok)
   + toint(reverb.stato != ok) + toint(provisioner.stato != ok) + toint(license_mgr.stato != ok) <= 1;
 
--- funzioni del sistema
+-- FUNZIONI DEL SISTEMA
+-- ogni funzione e' vera quando nessuno dei componenti sul suo percorso e' guasto
 
--- F1 comando: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX
+-- F1 comando: vero quando un comando inviato dal pannello arriva al bus KNX
+--    percorso: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX
 DEFINE comando_ok := pannello.stato != guasto & core.stato != guasto & broker.stato != guasto
                    & device.stato != guasto & gateway.stato != guasto & command_agent.stato != guasto;
 
--- F2 conferma della configurazione inviata ai device: (file JSON: utenti, zone, template):
--- Core (invio) -> broker -> device (CommandAgent) -> broker -> response_agent -> Redis -> Core (RedisCommandResponses)
+-- F2 conferma della configurazione: vero quando il Core riceve l'esito dell'invio
+--    dei file JSON ai device (utenti, zone, template)
+--    percorso: Core (invio) -> broker -> device (CommandAgent) -> broker -> response_agent -> Redis -> Core (RedisCommandResponses)
 DEFINE esito_ok := core.stato != guasto & device.stato != guasto & broker.stato != guasto & response_agent.stato != guasto
                  & redis.stato != guasto & command_agent.stato != guasto;
 
--- F3 stato del dispositivo: device -> broker -> state_agent -> Redis -> Core -> pannello
+-- F3 stato del dispositivo: vero quando il pannello mostra lo stato online/offline del device
+--    percorso: device (StateTelemetryAgent) -> broker -> state_agent -> Redis -> Core -> pannello
 DEFINE stato_visibile := device.stato != guasto & broker.stato != guasto & state_agent.stato != guasto
                        & redis.stato != guasto & core.stato != guasto & pannello.stato != guasto & stt_agent.stato != guasto;
 
--- F4 valore degli item: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Redis -> Core -> pannello
+-- F4 valore degli item: vero quando il pannello, all'apertura, mostra l'ultimo valore degli item
+--    percorso: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Redis -> Core -> pannello
 DEFINE valore_item_ok := gateway.stato != guasto & device.stato != guasto & broker.stato != guasto
                        & event_agent.stato != guasto & redis.stato != guasto & core.stato != guasto
                        & pannello.stato != guasto & knx_listener.stato != guasto;
 
--- F5 tempo reale: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Reverb -> pannello
+-- F5 tempo reale: vero quando il pannello aperto si aggiorna a ogni evento del bus
+--    percorso: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Reverb -> pannello
+--    DA CORREGGERE (in attesa di conferma): dal codice dell'EventAgent l'evento viene scritto
+--    in Redis prima di essere inoltrato a Reverb, quindi F5 dipende anche da Redis;
+--    la correzione cambia il risultato di [F5-6]
 DEFINE tempo_reale_ok := gateway.stato != guasto & device.stato != guasto & broker.stato != guasto
                        & event_agent.stato != guasto & reverb.stato != guasto & pannello.stato != guasto & knx_listener.stato != guasto;
 
--- F6 moduli installati (telemetria): device -> broker -> telemetry_agent -> Redis -> Core
+-- F6 moduli installati: vero quando il Core conosce i moduli installati sul device (telemetria)
+--    percorso: device (StateTelemetryAgent) -> broker -> telemetry_agent -> Redis -> Core
 DEFINE moduli_ok := device.stato != guasto & broker.stato != guasto & telemetry_agent.stato != guasto
                   & redis.stato != guasto & core.stato != guasto & stt_agent.stato != guasto;
 
--- F7 provisioning: device -> Provisioner -> Core (database) e Provisioner -> broker (dynsec)
+-- F7 provisioning: vero quando un device puo' ottenere le credenziali MQTT
+--    percorso: device -> Provisioner -> Core (database) e Provisioner -> broker (dynsec)
 DEFINE provisioning_ok := device.stato != guasto & provisioner.stato != guasto & core.stato != guasto
                         & broker.stato != guasto;
 
--- F8 licenze: Core -> License Manager, OPPURE copia locale delle licenze nel database
+-- F8 licenze: vero quando il Core puo' verificare le licenze dei moduli
+--    percorso: Core -> License Manager, oppure copia locale delle licenze nel database
 DEFINE licenze_ok := core.stato != guasto
                    & (license_mgr.stato != guasto | copia_locale_valida);
 
--- copia locale delle licenze: per ora sempre valida (da rendere variabile nei passi successivi)
+-- vero quando la copia locale delle licenze non e' scaduta: per ora sempre
+-- (da rendere variabile nei passi successivi)
 DEFINE copia_locale_valida := TRUE;
 
---======= DEVICE =======--
 
--- criticita': se il device si guasta, i comandi non sono disponibili
-CTLSPEC
-AG (device.stato = guasto -> !comando_ok)
+--======= CONTROLLO DEL MODELLO =======--
+-- proposte, da attivare dopo conferma (sono proprieta' nuove): ogni componente puo' guastarsi
+-- e ogni funzione puo' essere disponibile, altrimenti le proprieta' sarebbero vere in modo banale
+--   CTLSPEC EF broker.stato = guasto        (una per componente)
+--   CTLSPEC EF comando_ok                   (una per funzione)
 
--- tolleranza: i comandi possono funzionare con il device guasto
-CTLSPEC
-EF (device.stato = guasto & comando_ok)
 
--- criticita': se il device si guasta, l'esito dei comandi non e' disponibile
-CTLSPEC
-AG (device.stato = guasto -> !esito_ok)
+--======= F1 COMANDO =======--
+-- percorso: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX
 
--- tolleranza: l'esito dei comandi puo' funzionare con il device guasto
-CTLSPEC
-EF (device.stato = guasto & esito_ok)
+-- [F1-1] device: se il device si guasta, i comandi non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (device.stato = guasto -> !comando_ok)
 
--- criticita': se il device si guasta, lo stato del dispositivo non e' disponibile
-CTLSPEC
-AG (device.stato = guasto -> !stato_visibile)
+-- [F1-2] stt_agent: se lo stt_agent si guasta, i comandi non sono disponibili
+--          (atteso falso: non e' un punto critico; il device risulta offline, ma i comandi arrivano)
+CTLSPEC AG (stt_agent.stato = guasto -> !comando_ok)
 
--- tolleranza: lo stato del dispositivo puo' funzionare con il device guasto
-CTLSPEC
-EF (device.stato = guasto & stato_visibile)
+-- [F1-3] knx_listener: se il knx_listener si guasta, i comandi non sono disponibili
+--          (atteso falso: non e' un punto critico; la luce cambia, ma il pannello non lo vede)
+CTLSPEC AG (knx_listener.stato = guasto -> !comando_ok)
 
--- criticita': se il device si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (device.stato = guasto -> !valore_item_ok)
+-- [F1-4] command_agent: se il command_agent si guasta, i comandi non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (command_agent.stato = guasto -> !comando_ok)
 
--- tolleranza: il valore degli item puo' funzionare con il device guasto
-CTLSPEC
-EF (device.stato = guasto & valore_item_ok)
+-- [F1-5] gateway: se il gateway si guasta, i comandi non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (gateway.stato = guasto -> !comando_ok)
 
--- criticita': se il device si guasta, gli aggiornamenti in tempo reale non sono disponibili
-CTLSPEC
-AG (device.stato = guasto -> !tempo_reale_ok)
+-- [F1-6] broker: se il broker si guasta, i comandi non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (broker.stato = guasto -> !comando_ok)
 
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con il device guasto
-CTLSPEC
-EF (device.stato = guasto & tempo_reale_ok)
+-- [F1-7] core: se il Core si guasta, i comandi non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (core.stato = guasto -> !comando_ok)
 
--- criticita': se il device si guasta, i moduli installati non sono disponibili
-CTLSPEC
-AG (device.stato = guasto -> !moduli_ok)
+-- [F1-8] redis: se Redis si guasta, i comandi non sono disponibili
+--          (atteso falso: non e' un punto critico; da verificare con prova: cache di Laravel, controllo della licenza)
+CTLSPEC AG (redis.stato = guasto -> !comando_ok)
 
--- tolleranza: i moduli installati possono funzionare con il device guasto
-CTLSPEC
-EF (device.stato = guasto & moduli_ok)
+-- [F1-9] provisioner: se il Provisioner si guasta, i comandi non sono disponibili
+--          (atteso falso: non e' un punto critico; i device gia' connessi non hanno bisogno del Provisioner)
+CTLSPEC AG (provisioner.stato = guasto -> !comando_ok)
 
--- criticita': se il device si guasta, il provisioning non e' disponibile
-CTLSPEC
-AG (device.stato = guasto -> !provisioning_ok)
+-- [F1-10] license_mgr: se il License Manager si guasta, i comandi non sono disponibili
+--           (atteso falso: non e' un punto critico; il controllo della licenza usa la copia locale)
+CTLSPEC AG (license_mgr.stato = guasto -> !comando_ok)
 
--- tolleranza: il provisioning puo' funzionare con il device guasto
-CTLSPEC
-EF (device.stato = guasto & provisioning_ok)
+-- [F1-11] pannello: se il pannello si guasta, i comandi non sono disponibili
+--           (atteso vero: punto critico)
+CTLSPEC AG (pannello.stato = guasto -> !comando_ok)
 
 
---======= STT_AGENT (StateTelemetryAgent del device) =======--
+--======= F2 CONFERMA DELLA CONFIGURAZIONE =======--
+-- percorso: Core (invio) -> broker -> device (CommandAgent) -> broker -> response_agent -> Redis -> Core (RedisCommandResponses)
 
--- criticita': se lo stt_agent si guasta, lo stato del dispositivo non e' disponibile
-CTLSPEC
-AG (stt_agent.stato = guasto -> !stato_visibile)
+-- [F2-1] device: se il device si guasta, l'esito dei comandi non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (device.stato = guasto -> !esito_ok)
 
--- tolleranza: lo stato del dispositivo puo' funzionare con lo stt_agent guasto
-CTLSPEC
-EF (stt_agent.stato = guasto & stato_visibile)
+-- [F2-2] command_agent: se il command_agent si guasta, la conferma della configurazione non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (command_agent.stato = guasto -> !esito_ok)
 
--- criticita': se lo stt_agent si guasta, i moduli installati non sono disponibili
-CTLSPEC
-AG (stt_agent.stato = guasto -> !moduli_ok)
+-- [F2-3] broker: se il broker si guasta, l'esito dei comandi non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (broker.stato = guasto -> !esito_ok)
 
--- tolleranza: i moduli installati possono funzionare con lo stt_agent guasto
-CTLSPEC
-EF (stt_agent.stato = guasto & moduli_ok)
+-- [F2-4] core: se il Core si guasta, la conferma della configurazione non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (core.stato = guasto -> !esito_ok)
 
--- criticita': se lo stt_agent si guasta, i comandi non sono disponibili (atteso falso)
-CTLSPEC
-AG (stt_agent.stato = guasto -> !comando_ok)
+-- [F2-5] redis: se Redis si guasta, l'esito dei comandi non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (redis.stato = guasto -> !esito_ok)
 
--- tolleranza: i comandi possono funzionare con lo stt_agent guasto (il device risulta offline, ma i comandi arrivano)
-CTLSPEC
-EF (stt_agent.stato = guasto & comando_ok)
+-- [F2-6] response_agent: se il response_agent si guasta, l'esito dei comandi non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (response_agent.stato = guasto -> !esito_ok)
 
 
---======= KNX_LISTENER =======--
+--======= F3 STATO DEL DISPOSITIVO =======--
+-- percorso: device (StateTelemetryAgent) -> broker -> state_agent -> Redis -> Core -> pannello
 
--- criticita': se il knx_listener si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (knx_listener.stato = guasto -> !valore_item_ok)
+-- [F3-1] device: se il device si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (device.stato = guasto -> !stato_visibile)
 
--- tolleranza: il valore degli item puo' funzionare con il knx_listener guasto
-CTLSPEC
-EF (knx_listener.stato = guasto & valore_item_ok)
+-- [F3-2] stt_agent: se lo stt_agent si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (stt_agent.stato = guasto -> !stato_visibile)
 
--- criticita': se il knx_listener si guasta, gli aggiornamenti in tempo reale non sono disponibili
-CTLSPEC
-AG (knx_listener.stato = guasto -> !tempo_reale_ok)
+-- [F3-3] command_agent: se il command_agent si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso falso: non e' un punto critico; il device risulta online, ma i comandi non arrivano)
+CTLSPEC AG (command_agent.stato = guasto -> !stato_visibile)
 
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con il knx_listener guasto
-CTLSPEC
-EF (knx_listener.stato = guasto & tempo_reale_ok)
+-- [F3-4] gateway: se il gateway si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso falso: non e' un punto critico; il device risulta online anche se il gateway KNX e' giu')
+CTLSPEC AG (gateway.stato = guasto -> !stato_visibile)
 
--- criticita': se il knx_listener si guasta, i comandi non sono disponibili (atteso falso)
-CTLSPEC
-AG (knx_listener.stato = guasto -> !comando_ok)
+-- [F3-5] broker: se il broker si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (broker.stato = guasto -> !stato_visibile)
 
--- tolleranza: i comandi possono funzionare con il knx_listener guasto (la luce cambia, ma il pannello non lo vede)
-CTLSPEC
-EF (knx_listener.stato = guasto & comando_ok)
+-- [F3-6] core: se il Core si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (core.stato = guasto -> !stato_visibile)
 
+-- [F3-7] redis: se Redis si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (redis.stato = guasto -> !stato_visibile)
 
---======= COMMAND_AGENT =======--
+-- [F3-8] state_agent: se lo state_agent si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (state_agent.stato = guasto -> !stato_visibile)
 
--- criticita': se il command_agent si guasta, i comandi non sono disponibili
-CTLSPEC
-AG (command_agent.stato = guasto -> !comando_ok)
+-- [F3-9] provisioner: se il Provisioner si guasta, lo stato del dispositivo non e' disponibile
+--          (atteso falso: non e' un punto critico; lo stato arriva dal device gia' connesso)
+CTLSPEC AG (provisioner.stato = guasto -> !stato_visibile)
 
--- tolleranza: i comandi possono funzionare con il command_agent guasto
-CTLSPEC
-EF (command_agent.stato = guasto & comando_ok)
+-- [F3-10] pannello: se il pannello si guasta, lo stato del dispositivo non e' disponibile
+--           (atteso vero: punto critico)
+CTLSPEC AG (pannello.stato = guasto -> !stato_visibile)
 
--- criticita': se il command_agent si guasta, la conferma della configurazione non e' disponibile
-CTLSPEC
-AG (command_agent.stato = guasto -> !esito_ok)
 
--- tolleranza: la conferma della configurazione puo' funzionare con il command_agent guasto
-CTLSPEC
-EF (command_agent.stato = guasto & esito_ok)
+--======= F4 VALORE DEGLI ITEM =======--
+-- percorso: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Redis -> Core -> pannello
 
--- criticita': se il command_agent si guasta, lo stato del dispositivo non e' disponibile (atteso falso)
-CTLSPEC
-AG (command_agent.stato = guasto -> !stato_visibile)
+-- [F4-1] device: se il device si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (device.stato = guasto -> !valore_item_ok)
 
--- tolleranza: lo stato del dispositivo puo' funzionare con il command_agent guasto (il device risulta online, ma i comandi non arrivano)
-CTLSPEC
-EF (command_agent.stato = guasto & stato_visibile)
+-- [F4-2] knx_listener: se il knx_listener si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (knx_listener.stato = guasto -> !valore_item_ok)
 
---======= GATEWAY =======--
+-- [F4-3] gateway: se il gateway si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (gateway.stato = guasto -> !valore_item_ok)
 
--- criticita': se il gateway si guasta, i comandi non sono disponibili
-CTLSPEC
-AG (gateway.stato = guasto -> !comando_ok)
+-- [F4-4] broker: se il broker si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (broker.stato = guasto -> !valore_item_ok)
 
--- tolleranza: i comandi possono funzionare con il gateway guasto
-CTLSPEC
-EF (gateway.stato = guasto & comando_ok)
+-- [F4-5] core: se il Core si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (core.stato = guasto -> !valore_item_ok)
 
--- criticita': se il gateway si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (gateway.stato = guasto -> !valore_item_ok)
+-- [F4-6] redis: se Redis si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (redis.stato = guasto -> !valore_item_ok)
 
--- tolleranza: il valore degli item puo' funzionare con il gateway guasto
-CTLSPEC
-EF (gateway.stato = guasto & valore_item_ok)
+-- [F4-7] event_agent: se l'event_agent si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (event_agent.stato = guasto -> !valore_item_ok)
 
--- criticita': se il gateway si guasta, gli aggiornamenti in tempo reale non sono disponibili
-CTLSPEC
-AG (gateway.stato = guasto -> !tempo_reale_ok)
+-- [F4-8] reverb: se Reverb si guasta, il valore degli item non e' disponibile
+--          (atteso falso: non e' un punto critico; il valore all'apertura arriva da Redis, non da Reverb)
+CTLSPEC AG (reverb.stato = guasto -> !valore_item_ok)
 
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con il gateway guasto
-CTLSPEC
-EF (gateway.stato = guasto & tempo_reale_ok)
+-- [F4-9] pannello: se il pannello si guasta, il valore degli item non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (pannello.stato = guasto -> !valore_item_ok)
 
--- criticita': se il gateway si guasta, lo stato del dispositivo non e' disponibile (atteso falso)
-CTLSPEC
-AG (gateway.stato = guasto -> !stato_visibile)
 
--- tolleranza: lo stato del dispositivo puo' funzionare con il gateway guasto (il device risulta online anche se il gateway KNX e' giu')
-CTLSPEC
-EF (gateway.stato = guasto & stato_visibile)
+--======= F5 TEMPO REALE =======--
+-- percorso: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Reverb -> pannello
 
+-- [F5-1] device: se il device si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (device.stato = guasto -> !tempo_reale_ok)
 
---======= BROKER =======--
+-- [F5-2] knx_listener: se il knx_listener si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (knx_listener.stato = guasto -> !tempo_reale_ok)
 
--- criticita': se il broker si guasta, i comandi non sono disponibili
-CTLSPEC
-AG (broker.stato = guasto -> !comando_ok)
+-- [F5-3] gateway: se il gateway si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (gateway.stato = guasto -> !tempo_reale_ok)
 
--- tolleranza: i comandi possono funzionare con il broker guasto
-CTLSPEC
-EF (broker.stato = guasto & comando_ok)
+-- [F5-4] broker: se il broker si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (broker.stato = guasto -> !tempo_reale_ok)
 
--- criticita': se il broker si guasta, l'esito dei comandi non e' disponibile
-CTLSPEC
-AG (broker.stato = guasto -> !esito_ok)
+-- [F5-5] core: se il Core si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso falso: non e' un punto critico; Reverb riceve gli eventi dall'event_agent, non dal Core)
+CTLSPEC AG (core.stato = guasto -> !tempo_reale_ok)
 
--- tolleranza: l'esito dei comandi puo' funzionare con il broker guasto
-CTLSPEC
-EF (broker.stato = guasto & esito_ok)
+-- [F5-6] redis: se Redis si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso falso: non e' un punto critico; l'event_agent invia a Reverb indipendentemente da Redis;
+--          DA CORREGGERE: il codice dice il contrario, vedi il commento di F5)
+CTLSPEC AG (redis.stato = guasto -> !tempo_reale_ok)
 
--- criticita': se il broker si guasta, lo stato del dispositivo non e' disponibile
-CTLSPEC
-AG (broker.stato = guasto -> !stato_visibile)
+-- [F5-7] event_agent: se l'event_agent si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (event_agent.stato = guasto -> !tempo_reale_ok)
 
--- tolleranza: lo stato del dispositivo puo' funzionare con il broker guasto
-CTLSPEC
-EF (broker.stato = guasto & stato_visibile)
+-- [F5-8] reverb: se Reverb si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (reverb.stato = guasto -> !tempo_reale_ok)
 
--- criticita': se il broker si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (broker.stato = guasto -> !valore_item_ok)
+-- [F5-9] pannello: se il pannello si guasta, gli aggiornamenti in tempo reale non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (pannello.stato = guasto -> !tempo_reale_ok)
 
--- tolleranza: il valore degli item puo' funzionare con il broker guasto
-CTLSPEC
-EF (broker.stato = guasto & valore_item_ok)
 
--- criticita': se il broker si guasta, gli aggiornamenti in tempo reale non sono disponibili
-CTLSPEC
-AG (broker.stato = guasto -> !tempo_reale_ok)
+--======= F6 MODULI INSTALLATI =======--
+-- percorso: device (StateTelemetryAgent) -> broker -> telemetry_agent -> Redis -> Core
 
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con il broker guasto
-CTLSPEC
-EF (broker.stato = guasto & tempo_reale_ok)
+-- [F6-1] device: se il device si guasta, i moduli installati non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (device.stato = guasto -> !moduli_ok)
 
--- criticita': se il broker si guasta, i moduli installati non sono disponibili
-CTLSPEC
-AG (broker.stato = guasto -> !moduli_ok)
+-- [F6-2] stt_agent: se lo stt_agent si guasta, i moduli installati non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (stt_agent.stato = guasto -> !moduli_ok)
 
--- tolleranza: i moduli installati possono funzionare con il broker guasto
-CTLSPEC
-EF (broker.stato = guasto & moduli_ok)
+-- [F6-3] broker: se il broker si guasta, i moduli installati non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (broker.stato = guasto -> !moduli_ok)
 
--- criticita': se il broker si guasta, il provisioning non e' disponibile
-CTLSPEC
-AG (broker.stato = guasto -> !provisioning_ok)
+-- [F6-4] core: se il Core si guasta, i moduli installati non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (core.stato = guasto -> !moduli_ok)
 
--- tolleranza: il provisioning puo' funzionare con il broker guasto
-CTLSPEC
-EF (broker.stato = guasto & provisioning_ok)
+-- [F6-5] redis: se Redis si guasta, i moduli installati non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (redis.stato = guasto -> !moduli_ok)
 
+-- [F6-6] telemetry_agent: se il telemetry_agent si guasta, i moduli installati non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (telemetry_agent.stato = guasto -> !moduli_ok)
 
---======= CORE =======--
 
--- criticita': se il Core si guasta, i comandi non sono disponibili
-CTLSPEC
-AG (core.stato = guasto -> !comando_ok)
+--======= F7 PROVISIONING =======--
+-- percorso: device -> Provisioner -> Core (database) e Provisioner -> broker (dynsec)
 
--- tolleranza: i comandi possono funzionare con il Core guasto
-CTLSPEC
-EF (core.stato = guasto & comando_ok)
+-- [F7-1] device: se il device si guasta, il provisioning non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (device.stato = guasto -> !provisioning_ok)
 
--- criticita': se il Core si guasta, lo stato del dispositivo non e' disponibile
-CTLSPEC
-AG (core.stato = guasto -> !stato_visibile)
+-- [F7-2] broker: se il broker si guasta, il provisioning non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (broker.stato = guasto -> !provisioning_ok)
 
--- tolleranza: lo stato del dispositivo puo' funzionare con il Core guasto
-CTLSPEC
-EF (core.stato = guasto & stato_visibile)
+-- [F7-3] core: se il Core si guasta, il provisioning non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (core.stato = guasto -> !provisioning_ok)
 
--- criticita': se il Core si guasta, la conferma della configurazione non e' disponibile
-CTLSPEC
-AG (core.stato = guasto -> !esito_ok)
+-- [F7-4] provisioner: se il Provisioner si guasta, il provisioning non e' disponibile
+--          (atteso vero: punto critico)
+CTLSPEC AG (provisioner.stato = guasto -> !provisioning_ok)
 
--- tolleranza: la conferma della configurazione puo' funzionare con il Core guasto
-CTLSPEC
-EF (core.stato = guasto & esito_ok)
 
--- criticita': se il Core si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (core.stato = guasto -> !valore_item_ok)
+--======= F8 LICENZE =======--
+-- percorso: Core -> License Manager, oppure copia locale delle licenze nel database
 
--- tolleranza: il valore degli item puo' funzionare con il Core guasto
-CTLSPEC
-EF (core.stato = guasto & valore_item_ok)
+-- [F8-1] core: se il Core si guasta, le licenze non sono disponibili
+--          (atteso vero: punto critico)
+CTLSPEC AG (core.stato = guasto -> !licenze_ok)
 
--- criticita': se il Core si guasta, i moduli installati non sono disponibili
-CTLSPEC
-AG (core.stato = guasto -> !moduli_ok)
+-- [F8-2] license_mgr: se il License Manager si guasta, le licenze non sono disponibili
+--          (atteso falso: non e' un punto critico; grazie alla copia locale)
+CTLSPEC AG (license_mgr.stato = guasto -> !licenze_ok)
 
--- tolleranza: i moduli installati possono funzionare con il Core guasto
-CTLSPEC
-EF (core.stato = guasto & moduli_ok)
+--------------------------------------------------------------------------
+-- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI
+-- Solo commenti: indicano le sezioni da aggiungere e la forma delle proprieta'.
+--------------------------------------------------------------------------
 
--- criticita': se il Core si guasta, il provisioning non e' disponibile
-CTLSPEC
-AG (core.stato = guasto -> !provisioning_ok)
+--======= SITUAZIONI INGANNEVOLI (DA FARE: si puo' fare subito) =======--
+-- oggi si ricavano confrontando due proprieta'; si possono scrivere direttamente:
+--   device online ma senza comandi  : CTLSPEC EF (stato_visibile & !comando_ok)
+--   comando eseguito, pannello fermo: CTLSPEC EF (comando_ok & !valore_item_ok)
+--   lo stesso in tempo reale        : CTLSPEC EF (comando_ok & !tempo_reale_ok)
+-- (attese vere; il controesempio della negazione AG (... -> ...) mostra il componente responsabile)
 
--- tolleranza: il provisioning puo' funzionare con il Core guasto
-CTLSPEC
-EF (core.stato = guasto & provisioning_ok)
+--======= RIPRESA (DA FARE: dopo l'unione con cicli_agent.smv) =======--
+-- le proprieta' [R], [B], [D], [I], [RR] di cicli_agent.smv, piu' le funzioni di questo file:
+--   dopo un guasto del broker i comandi tornano disponibili?
+--   LTLSPEC (F G <componenti stabili>) -> G (broker.stato = guasto -> F comando_ok)
 
--- criticita': se il Core si guasta, le licenze non sono disponibili
-CTLSPEC
-AG (core.stato = guasto -> !licenze_ok)
+--======= MESSAGGI PERSI O ALTERATI (DA FARE: con il modulo messaggio) =======--
+-- per ogni messaggio M1-M4:
+--   consegna   : se il percorso e' disponibile, il messaggio inviato viene consegnato?
+--   perdita    : il messaggio puo' perdersi senza che nessuno se ne accorga?
+--                (es. M2: il comando resta "inviato" per sempre)
+--   alterazione: un componente compromesso puo' far arrivare un contenuto diverso?
+--                (collegamento con la parte sulla sicurezza)
 
--- tolleranza: le licenze possono funzionare con il Core guasto
-CTLSPEC
-EF (core.stato = guasto & licenze_ok)
-
--- criticita': se il Core si guasta, gli aggiornamenti in tempo reale non sono disponibili (atteso falso)
-CTLSPEC
-AG (core.stato = guasto -> !tempo_reale_ok)
-
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con il Core guasto (Reverb riceve gli eventi dall'event_agent, non dal Core)
-CTLSPEC
-EF (core.stato = guasto & tempo_reale_ok)
-
-
---======= REDIS =======--
-
--- criticita': se Redis si guasta, l'esito dei comandi non e' disponibile
-CTLSPEC
-AG (redis.stato = guasto -> !esito_ok)
-
--- tolleranza: l'esito dei comandi puo' funzionare con Redis guasto
-CTLSPEC
-EF (redis.stato = guasto & esito_ok)
-
--- criticita': se Redis si guasta, lo stato del dispositivo non e' disponibile
-CTLSPEC
-AG (redis.stato = guasto -> !stato_visibile)
-
--- tolleranza: lo stato del dispositivo puo' funzionare con Redis guasto
-CTLSPEC
-EF (redis.stato = guasto & stato_visibile)
-
--- criticita': se Redis si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (redis.stato = guasto -> !valore_item_ok)
-
--- tolleranza: il valore degli item puo' funzionare con Redis guasto
-CTLSPEC
-EF (redis.stato = guasto & valore_item_ok)
-
--- criticita': se Redis si guasta, i moduli installati non sono disponibili
-CTLSPEC
-AG (redis.stato = guasto -> !moduli_ok)
-
--- tolleranza: i moduli installati possono funzionare con Redis guasto
-CTLSPEC
-EF (redis.stato = guasto & moduli_ok)
-
--- criticita': se Redis si guasta, i comandi non sono disponibili (atteso falso)
-CTLSPEC
-AG (redis.stato = guasto -> !comando_ok)
-
--- tolleranza: i comandi possono funzionare con Redis guasto (da verificare con prova: cache di Laravel, controllo della licenza)
-CTLSPEC
-EF (redis.stato = guasto & comando_ok)
-
--- criticita': se Redis si guasta, gli aggiornamenti in tempo reale non sono disponibili (atteso falso)
-CTLSPEC
-AG (redis.stato = guasto -> !tempo_reale_ok)
-
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con Redis guasto (l'event_agent invia a Reverb indipendentemente da Redis)
-CTLSPEC
-EF (redis.stato = guasto & tempo_reale_ok)
-
-
---======= STATE_AGENT =======--
-
--- criticita': se lo state_agent si guasta, lo stato del dispositivo non e' disponibile
-CTLSPEC
-AG (state_agent.stato = guasto -> !stato_visibile)
-
--- tolleranza: lo stato del dispositivo puo' funzionare con lo state_agent guasto
-CTLSPEC
-EF (state_agent.stato = guasto & stato_visibile)
-
-
---======= RESPONSE_AGENT =======--
-
--- criticita': se il response_agent si guasta, l'esito dei comandi non e' disponibile
-CTLSPEC
-AG (response_agent.stato = guasto -> !esito_ok)
-
--- tolleranza: l'esito dei comandi puo' funzionare con il response_agent guasto
-CTLSPEC
-EF (response_agent.stato = guasto & esito_ok)
-
-
---======= EVENT_AGENT =======--
-
--- criticita': se l'event_agent si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (event_agent.stato = guasto -> !valore_item_ok)
-
--- tolleranza: il valore degli item puo' funzionare con l'event_agent guasto
-CTLSPEC
-EF (event_agent.stato = guasto & valore_item_ok)
-
--- criticita': se l'event_agent si guasta, gli aggiornamenti in tempo reale non sono disponibili
-CTLSPEC
-AG (event_agent.stato = guasto -> !tempo_reale_ok)
-
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con l'event_agent guasto
-CTLSPEC
-EF (event_agent.stato = guasto & tempo_reale_ok)
-
-
---======= TELEMETRY_AGENT =======--
-
--- criticita': se il telemetry_agent si guasta, i moduli installati non sono disponibili
-CTLSPEC
-AG (telemetry_agent.stato = guasto -> !moduli_ok)
-
--- tolleranza: i moduli installati possono funzionare con il telemetry_agent guasto
-CTLSPEC
-EF (telemetry_agent.stato = guasto & moduli_ok)
-
-
---======= REVERB =======--
-
--- criticita': se Reverb si guasta, gli aggiornamenti in tempo reale non sono disponibili
-CTLSPEC
-AG (reverb.stato = guasto -> !tempo_reale_ok)
-
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con Reverb guasto
-CTLSPEC
-EF (reverb.stato = guasto & tempo_reale_ok)
-
--- criticita': se Reverb si guasta, il valore degli item non e' disponibile (atteso falso)
-CTLSPEC
-AG (reverb.stato = guasto -> !valore_item_ok)
-
--- tolleranza: il valore degli item puo' funzionare con Reverb guasto (il valore all'apertura arriva da Redis, non da Reverb)
-CTLSPEC
-EF (reverb.stato = guasto & valore_item_ok)
-
-
---======= PROVISIONER =======--
-
--- criticita': se il Provisioner si guasta, il provisioning non e' disponibile
-CTLSPEC
-AG (provisioner.stato = guasto -> !provisioning_ok)
-
--- tolleranza: il provisioning puo' funzionare con il Provisioner guasto
-CTLSPEC
-EF (provisioner.stato = guasto & provisioning_ok)
-
--- criticita': se il Provisioner si guasta, i comandi non sono disponibili (atteso falso)
-CTLSPEC
-AG (provisioner.stato = guasto -> !comando_ok)
-
--- tolleranza: i comandi possono funzionare con il Provisioner guasto (i device gia' connessi non hanno bisogno del Provisioner)
-CTLSPEC
-EF (provisioner.stato = guasto & comando_ok)
-
--- criticita': se il Provisioner si guasta, lo stato del dispositivo non e' disponibile (atteso falso)
-CTLSPEC
-AG (provisioner.stato = guasto -> !stato_visibile)
-
--- tolleranza: lo stato del dispositivo puo' funzionare con il Provisioner guasto (lo stato arriva dal device gia' connesso)
-CTLSPEC
-EF (provisioner.stato = guasto & stato_visibile)
-
-
---======= LICENSE_MGR =======--
-
--- criticita': se il License Manager si guasta, le licenze non sono disponibili (atteso falso)
-CTLSPEC
-AG (license_mgr.stato = guasto -> !licenze_ok)
-
--- tolleranza: le licenze possono funzionare con il License Manager guasto (grazie alla copia locale)
-CTLSPEC
-EF (license_mgr.stato = guasto & licenze_ok)
-
--- criticita': se il License Manager si guasta, i comandi non sono disponibili (atteso falso)
-CTLSPEC
-AG (license_mgr.stato = guasto -> !comando_ok)
-
--- tolleranza: i comandi possono funzionare con il License Manager guasto (il controllo della licenza usa la copia locale)
-CTLSPEC
-EF (license_mgr.stato = guasto & comando_ok)
-
-
---======= PANNELLO =======--
-
--- criticita': se il pannello si guasta, i comandi non sono disponibili
-CTLSPEC
-AG (pannello.stato = guasto -> !comando_ok)
-
--- tolleranza: i comandi possono funzionare con il pannello guasto
-CTLSPEC
-EF (pannello.stato = guasto & comando_ok)
-
--- criticita': se il pannello si guasta, lo stato del dispositivo non e' disponibile
-CTLSPEC
-AG (pannello.stato = guasto -> !stato_visibile)
-
--- tolleranza: lo stato del dispositivo puo' funzionare con il pannello guasto
-CTLSPEC
-EF (pannello.stato = guasto & stato_visibile)
-
--- criticita': se il pannello si guasta, il valore degli item non e' disponibile
-CTLSPEC
-AG (pannello.stato = guasto -> !valore_item_ok)
-
--- tolleranza: il valore degli item puo' funzionare con il pannello guasto
-CTLSPEC
-EF (pannello.stato = guasto & valore_item_ok)
-
--- criticita': se il pannello si guasta, gli aggiornamenti in tempo reale non sono disponibili
-CTLSPEC
-AG (pannello.stato = guasto -> !tempo_reale_ok)
-
--- tolleranza: gli aggiornamenti in tempo reale possono funzionare con il pannello guasto
-CTLSPEC
-EF (pannello.stato = guasto & tempo_reale_ok)
-
-
-
--- MODELLO DEL COMPONENTE:
--- lo stato cambia in modo non deterministico (i guasti possono comparire e sparire in qualunque momento)
-
-MODULE componente
-
-VAR
-stato : {ok, guasto, compromesso};
-
-ASSIGN
-
-init(stato) := ok;
-next(stato) := {ok, guasto, compromesso};
+--======= DISALLINEAMENTO (DA FARE: con luce_reale e luce_pannello) =======--
+--   allineamento       : CTLSPEC AG (luce_pannello = luce_reale)                 (atteso falso)
+--   riallineamento     : CTLSPEC AG (luce_pannello != luce_reale -> AF luce_pannello = luce_reale)
+--                        (atteso falso: un evento perso non viene recuperato)
+--   con stabilita'     : LTLSPEC (F G <componenti stabili>) -> G F (luce_pannello = luce_reale)
+--                        (da scoprire: dipende da come si recupera un evento perso)
+--   interruttore fisico: la luce puo' cambiare senza che il cloud lo sappia?
