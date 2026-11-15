@@ -1,0 +1,500 @@
+-- Modello base della piattaforma IoT per la building automation: accensione di una luce
+-- Tesi di laurea triennale - Daniele Tontini
+-- Il focus e' un'unica azione, seguita lungo tutta la piattaforma: l'utente accende o spegne
+-- una luce dal pannello, e il pannello mostra lo stato della luce.
+-- Unisce i due modelli precedenti: i punti critici (robustezza.smv) e il ciclo di
+-- riconnessione degli agent del device (cicli_agent.smv). 
+--
+-- Componenti:
+--   pannello        = pannello web nel browser: invia i comandi e mostra lo stato della luce
+--   core            = Core (applicazione Laravel con il suo database)
+--   broker          = broker MQTT
+--   device          = dispositivo (Logic Machine) su cui girano gli agent
+--   command_agent   = agent del device che esegue i comandi (CommandAgent)
+--   knx_listener    = agent del device che inoltra al broker gli eventi del bus KNX
+--   gateway         = gateway KNX/IP fra il device e il bus
+--   event_agent     = agent del core che riceve gli eventi KNX e li scrive in Redis
+--   redis           = Redis: conserva l'ultimo valore della luce letto dal Core
+--   provisioner     = consegna agli agent le credenziali MQTT
+--
+-- Percorsi:
+--   comando: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX -> luce
+--   ritorno: luce -> bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent
+--            -> Redis -> Core -> pannello
+--
+-- Ingressi ambientali:
+--   comando        = tasto premuto dall'utente nel pannello in questo passo
+--   interruttore   = qualcuno preme l'interruttore fisico in questo passo
+--   lo stato di ogni componente (funzionante, guasto, compromesso) e' libero
+--   riavvio_remoto = scenario scelto all'inizio e mai modificato (FROZENVAR)
+--
+-- Ipotesi:
+--   modello di guasto: guasto = guasto silenzioso (il componente non risponde);
+--   compromesso = guasto bizantino, che per ora si comporta come funzionante
+--   al massimo due componenti non funzionanti alla volta (INVAR)
+--   ogni componente prima o poi torna a funzionare (JUSTICE)
+--   un comando o un evento attraversa tutto il suo percorso in un solo passo: arriva se
+--   in quel passo tutti i componenti del percorso sono disponibili, altrimenti e' perso
+--   (nessun ritentativo: il Core non ritenta e gli agent usano la sessione pulita)
+--   il pannello mostra l'ultimo valore arrivato in Redis: un evento perso non viene
+--   recuperato finche' la luce non cambia di nuovo (nessuna rilettura periodica;
+--   da chiarire con il tutor)
+--   l'interruttore fisico e' collegato al bus KNX (configurazione di produzione):
+--   agisce sulla luce anche senza cloud, e il suo telegramma segue il percorso di ritorno
+--   se nello stesso passo arrivano un comando e una pressione dell'interruttore, vale il comando
+--   i due agent del device hanno lo stesso ciclo (provisioning, connessione, operativo),
+--   ricavato dallo switch dei rispettivi main.php; BOOT, attese e contatori sono astratti
+--   il riavvio da remoto e' un meccanismo previsto, non ancora implementato: e' un comando
+--   come gli altri, quindi lo riceve ed esegue il CommandAgent. Ne segue che il CommandAgent
+--   puo' riavviare gli altri agent del device ma non se stesso: se si blocca, non esiste
+--   nessun modo di farlo ripartire da remoto (serve un intervento sul posto, non modellato)
+--   i componenti sono indipendenti: non e' modellato il guasto di una macchina che ne
+--   ospita piu' di uno (es. Core e Redis sullo stesso server; da chiarire con il tutor)
+--   Estensioni previste: vedi le sezioni "DA FARE"
+--
+-- Le proprieta' sono numerate per categoria (C = controllo del modello, CM = comando,
+-- PC = punti critici, AL = allineamento fra luce e pannello, R = ripresa,
+-- SA = stallo del CommandAgent);
+-- per ognuna sono indicati cosa verifica e il risultato atteso
+
+
+--======= MODELLO DEL COMPONENTE =======--
+-- stampo per i componenti che hanno solo uno stato
+MODULE componente
+
+VAR
+-- stato del componente
+--   funzionante = risponde correttamente
+--   guasto      = non risponde (guasto silenzioso)
+--   compromesso = risponde in modo scorretto (guasto bizantino)
+stato : {funzionante, guasto, compromesso};
+
+ASSIGN
+init(stato) := funzionante;                         -- all'avvio tutto funziona
+
+next(stato) := {funzionante, guasto, compromesso};  -- i guasti compaiono e spariscono liberamente
+
+
+--======= MODELLO DEL CICLO DEGLI AGENT =======--
+-- ciclo comune agli agent del device (verificato sui main.php)
+-- puo_essere_riavviato: vero quando in questo passo un riavvio da remoto puo' raggiungere l'agent
+MODULE ciclo_agent(device, provisioner, core, broker, puo_essere_riavviato)
+
+VAR
+-- stato del processo dell'agent
+--   funzionante = in esecuzione
+--   guasto      = bloccato o terminato
+--   compromesso = in esecuzione ma con comportamento scorretto
+stato : {funzionante, guasto, compromesso};
+
+-- fase del ciclo (stato dello switch in main.php)
+--   provisioning = CLOUD_SYNC:   richiede le credenziali al Provisioner
+--   connessione  = MQTT_CONNECT: si connette al broker
+--   operativo    = RUN:          scambia messaggi con il broker
+fase  : {provisioning, connessione, operativo};
+
+DEFINE
+-- vero quando l'agent puo' ricevere o inviare messaggi in questo passo
+pronto := fase = operativo & stato != guasto;
+
+ASSIGN
+init(stato) := funzionante;   -- il processo parte in esecuzione
+init(fase)  := provisioning;  -- la prima cosa che fa e' chiedere le credenziali
+
+next(stato) :=
+  case
+
+  -- BLOCCATO
+     stato = guasto & puo_essere_riavviato                 : {guasto, funzionante};  -- il riavvio da remoto puo' arrivare
+     stato = guasto                                        : guasto;                 -- nessuno puo' riavviarlo: resta bloccato
+
+  TRUE                                                     : {funzionante, guasto, compromesso};  -- altrimenti lo stato e' libero
+  esac;
+
+next(fase) :=
+  case
+
+  -- RIAVVIO (del device o del processo: si riparte da BOOT)
+     device.stato = guasto | stato = guasto                : provisioning;
+
+  -- PROVISIONING (getCredentials al Provisioner, che interroga il Core)
+     fase = provisioning & provisioner.stato != guasto
+                         & core.stato != guasto            : connessione;   -- credenziali ottenute
+     fase = provisioning                                   : provisioning;  -- fallito: riprova
+
+  -- CONNESSIONE (al broker)
+     fase = connessione & broker.stato != guasto           : operativo;     -- connesso
+     fase = connessione                                    : {connessione, provisioning};  -- riprova, o tentativi finiti
+
+  -- OPERATIVO
+     fase = operativo & broker.stato = guasto              : provisioning;  -- errore: torna al provisioning
+
+  TRUE                                                     : fase;          -- resta nella fase attuale
+  esac;
+
+
+--------------------------------------------------------------------------
+-- DA FARE: MODULI DEI PASSI SUCCESSIVI (solo commenti)
+--------------------------------------------------------------------------
+
+--======= MODELLO DEL CICLO DEL KNX LISTENER (DA FARE: 2) =======--
+-- oggi knx_listener usa ciclo_agent. In cicli_agent.smv c'e' il modulo ciclo_knx_listener:
+--   all'ingresso in RUN apre il tunnel KNXnet/IP: con il gateway guasto torna al provisioning;
+--   collegamento_knx : {attivo, perso} = stato del tunnel, che puo' cadere senza che
+--   il listener se ne accorga (da raffinare: perdita rilevata o silenziosa).
+-- Per usarlo: copiare il modulo, cambiare il tipo di knx_listener in main e aggiungere
+-- "knx_listener.collegamento_knx = attivo" al DEFINE evento_consegnato.
+
+--======= MODELLO DEI MESSAGGI (DA FARE: 1) =======--
+-- oggi un comando o un evento arriva se tutto il percorso e' disponibile nello stesso passo.
+-- Estensioni, in ordine:
+--   perdita libera: aggiungere a comando_consegnato ed evento_consegnato un ingresso
+--     ambientale (es. comando_perso : boolean) per i tratti senza garanzia di consegna (QoS 0);
+--   alterazione: se un componente del percorso e' compromesso, la luce puo' assumere
+--     il valore opposto a quello richiesto (collegamento con la parte sulla sicurezza);
+--   esito del comando (M2): variabile esito : {nessuno, atteso, confermato}, con il percorso
+--     command_agent -> broker -> response_agent -> Redis -> Core;
+--   percorso in piu' passi: una variabile per tratto, se serve distinguere dove si perde.
+
+--======= MODELLO DELLE LICENZE (DA FARE: 4) =======--
+-- alcuni moduli (es. BluKey) funzionano solo con una licenza; il modulo KNX no: e' sempre
+-- abilitato, quindi la luce non dipende dalle licenze. Serve un secondo tipo di comando,
+-- diretto a un modulo con licenza.
+--
+-- Meccanismo (dal codice del Core: licence:retrieve e copia locale nel database):
+--   License Manager raggiungibile e licenza presente -> la copia locale viene aggiornata
+--   License Manager non raggiungibile                -> l'errore e' ignorato e resta valida
+--                                                       la copia locale (fail-open)
+--   copia locale non aggiornata da piu' di N giorni  -> scade (con N = 0 non scade mai)
+--   License Manager risponde "nessuna licenza"       -> la copia locale viene cancellata (fail-closed)
+--
+-- Schema:
+--   in main, VAR
+--     license_mgr   : componente;        -- License Manager
+--     -- copia locale delle licenze nel database del Core
+--     --   valida  = il modulo con licenza puo' essere usato
+--     --   scaduta = non aggiornata in tempo, oppure cancellata
+--     copia_licenza : {valida, scaduta};
+--     -- secondo ingresso ambientale: comando per un modulo con licenza
+--     comando_modulo : boolean;
+--
+--   init(copia_licenza) := valida;
+--   next(copia_licenza) :=
+--     case
+--     -- LICENSE MANAGER COMPROMESSO
+--        license_mgr.stato = compromesso & core.stato != guasto : {valida, scaduta};  -- puo' rispondere "nessuna licenza"
+--     -- LICENSE MANAGER FUNZIONANTE
+--        license_mgr.stato = funzionante & core.stato != guasto : valida;             -- copia aggiornata
+--     -- LICENSE MANAGER NON RAGGIUNGIBILE (o Core guasto: licence:retrieve non gira)
+--        copia_licenza = valida                                 : {valida, scaduta};  -- il tempo passa: puo' scadere
+--     TRUE                                                      : copia_licenza;
+--     esac;
+--
+--   DEFINE comando_modulo_consegnato := comando_modulo & percorso_comando & copia_licenza = valida;
+--
+-- Astrazioni: i giorni di validita' non sono contati (la scadenza e' una scelta non
+-- deterministica); una sola licenza per un solo modulo.
+-- Ipotesi da rendere esplicita con una FROZENVAR (es. copia_senza_scadenza): con N = 0
+-- la copia non scade mai e la riga "il tempo passa" non si applica.
+-- Da aggiungere anche: license_mgr nell'INVAR e una JUSTICE license_mgr.stato = funzionante.
+-- Da chiarire con il tutor: valore di N (local_database_days_of_validity) e frequenza di
+-- licence:retrieve in produzione; se la licenza e' controllata a ogni comando del modulo
+-- o solo all'attivazione del modulo nel pannello.
+
+--======= MODELLO DEGLI ALTRI COMPONENTI (DA FARE: 3) =======--
+--   stt_agent e state_agent : stato online/offline del device nel pannello (scade in Redis
+--                             dopo 30 s) -> variabile device_online_pannello : boolean
+--   agent del core          : cicli ricavati dal codice (event_agent puo' restare connesso
+--                             senza sottoscrizioni o terminare; vedi 07_Agent nel vault)
+--   reverb                  : aggiornamento in tempo reale del pannello aperto
+--   rilettura               : se il tutor conferma che i valori vengono riletti, aggiungere
+--                             a next(luce_pannello) una riga di riallineamento
+--   scheduler               : composizione asincrona, quando piu' componenti scrivono lo stesso dato
+
+
+--======= MAIN =======--
+MODULE main
+
+FROZENVAR
+riavvio_remoto  : boolean;      -- ipotesi: gli agent del device possono essere riavviati dal cloud;
+                                -- NuSMV verifica entrambi gli scenari, con e senza il meccanismo
+
+VAR
+-- ingressi ambientali
+--   comando: tasto premuto dall'utente nel pannello in questo passo
+--     nessuno = nessun tasto premuto
+--     accendi = richiesta di accendere la luce
+--     spegni  = richiesta di spegnere la luce
+comando         : {nessuno, accendi, spegni};
+interruttore    : boolean;      -- qualcuno preme l'interruttore fisico (collegato al bus KNX)
+
+-- la luce
+luce_impianto   : boolean;      -- stato vero della luce nell'impianto (sul bus KNX)
+luce_pannello   : boolean;      -- stato della luce mostrato nel pannello (ultimo valore arrivato in Redis)
+
+-- componenti
+pannello        : componente;   -- pannello web nel browser
+core            : componente;   -- Core con il suo database
+broker          : componente;   -- broker MQTT
+device          : componente;   -- dispositivo (Logic Machine)
+command_agent   : ciclo_agent(device, provisioner, core, broker, FALSE);             -- esegue i comandi; non puo' riavviare se stesso
+knx_listener    : ciclo_agent(device, provisioner, core, broker, riavvio_listener);  -- inoltra gli eventi del bus KNX
+gateway         : componente;   -- gateway KNX/IP
+event_agent     : componente;   -- agent del core che scrive gli eventi KNX in Redis
+redis           : componente;   -- Redis
+provisioner     : componente;   -- consegna le credenziali agli agent
+
+DEFINE
+-- vero quando un comando premuto in questo passo arriva fino alla luce
+-- percorso: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX
+percorso_comando := pannello.stato != guasto & core.stato != guasto & broker.stato != guasto
+                  & device.stato != guasto & command_agent.pronto & gateway.stato != guasto;
+comando_consegnato := comando != nessuno & percorso_comando;
+
+-- vero quando in questo passo un riavvio da remoto puo' raggiungere il KNX listener:
+-- e' un comando, quindi segue il percorso del comando fino al CommandAgent (senza il gateway)
+riavvio_listener := riavvio_remoto & pannello.stato != guasto & core.stato != guasto
+                  & broker.stato != guasto & device.stato != guasto & command_agent.pronto;
+
+-- vero quando un cambiamento della luce in questo passo arriva fino al pannello
+-- percorso: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Redis -> Core -> pannello
+evento_consegnato := gateway.stato != guasto & device.stato != guasto & knx_listener.pronto
+                   & broker.stato != guasto & event_agent.stato != guasto & redis.stato != guasto
+                   & core.stato != guasto & pannello.stato != guasto;
+
+-- vero quando il pannello mostra lo stato vero della luce
+allineato := luce_pannello = luce_impianto;
+
+ASSIGN
+init(luce_impianto) := FALSE;   -- la luce parte spenta
+init(luce_pannello) := FALSE;   -- e il pannello la mostra spenta
+
+next(luce_impianto) :=
+  case
+
+  -- COMANDO DAL PANNELLO
+     comando = accendi & comando_consegnato   : TRUE;            -- il comando arriva: luce accesa
+     comando = spegni  & comando_consegnato   : FALSE;           -- il comando arriva: luce spenta
+
+  -- INTERRUTTORE FISICO
+     interruttore                             : !luce_impianto;  -- sul bus KNX: funziona anche senza cloud
+
+  TRUE                                        : luce_impianto;   -- la luce non cambia da sola
+  esac;
+
+next(luce_pannello) :=
+  case
+
+  -- EVENTO KNX
+     next(luce_impianto) != luce_impianto & evento_consegnato : next(luce_impianto);  -- la luce cambia e l'evento arriva
+                                                                             -- (se non arriva, l'evento e' perso)
+
+  TRUE                                                  : luce_pannello;     -- il pannello mostra l'ultimo valore ricevuto
+  esac;
+
+-- al massimo due componenti non funzionanti alla volta: con uno solo, la dipendenza
+-- del riavvio da remoto dal CommandAgent e dal resto del percorso non emergerebbe mai
+INVAR toint(pannello.stato != funzionante) + toint(core.stato != funzionante)
+    + toint(broker.stato != funzionante) + toint(device.stato != funzionante)
+    + toint(command_agent.stato != funzionante) + toint(knx_listener.stato != funzionante)
+    + toint(gateway.stato != funzionante) + toint(event_agent.stato != funzionante)
+    + toint(redis.stato != funzionante) + toint(provisioner.stato != funzionante) <= 2
+
+-- fairness dei componenti: prima o poi tornano a funzionare; senza, i controesempi
+-- sarebbero banali (un componente che resta guasto per sempre)
+JUSTICE pannello.stato = funzionante
+JUSTICE core.stato = funzionante
+JUSTICE broker.stato = funzionante
+JUSTICE device.stato = funzionante
+JUSTICE gateway.stato = funzionante
+JUSTICE event_agent.stato = funzionante
+JUSTICE redis.stato = funzionante
+JUSTICE provisioner.stato = funzionante
+
+-- fairness del KNX listener: se il riavvio da remoto resta possibile, prima o poi arriva
+-- nessuna fairness per il CommandAgent: se si blocca, nessuno puo' farlo ripartire
+JUSTICE knx_listener.stato != guasto | !riavvio_listener
+
+
+--======= CONTROLLO DEL MODELLO =======--
+
+-- [C1] la luce puo' accendersi con un comando dal pannello (atteso vero)
+CTLSPEC EF (comando = accendi & comando_consegnato)
+
+-- [C2] il pannello puo' mostrare la luce accesa quando e' accesa (atteso vero)
+CTLSPEC EF (luce_impianto & luce_pannello)
+
+-- [C3] entrambi gli agent possono essere pronti insieme (atteso vero)
+CTLSPEC EF (command_agent.pronto & knx_listener.pronto)
+
+
+--======= COMANDO =======--
+
+-- [CM1] accensione: se il comando accendi viene consegnato, al passo dopo la luce e' accesa
+--       (atteso vero)
+CTLSPEC AG ((comando = accendi & comando_consegnato) -> AX luce_impianto)
+
+-- [CM2] spegnimento: se il comando spegni viene consegnato, al passo dopo la luce e' spenta
+--       (atteso vero)
+CTLSPEC AG ((comando = spegni & comando_consegnato) -> AX !luce_impianto)
+
+-- [CM3] nessuna accensione spontanea: senza comando consegnato e senza interruttore,
+--       la luce spenta resta spenta (atteso vero)
+CTLSPEC AG ((!luce_impianto & !comando_consegnato & !interruttore) -> AX !luce_impianto)
+
+-- [CM4] nessuno spegnimento spontaneo: senza comando consegnato e senza interruttore,
+--       la luce accesa resta accesa (atteso vero)
+CTLSPEC AG ((luce_impianto & !comando_consegnato & !interruttore) -> AX luce_impianto)
+
+-- [CM5] comando perso: un comando premuto con il pannello funzionante puo' non arrivare
+--       (atteso vero: basta un componente del percorso non disponibile; nessuno ritenta)
+CTLSPEC EF (comando = accendi & pannello.stato = funzionante & !comando_consegnato)
+
+-- [CM6] interruttore senza cloud: con il broker guasto l'interruttore accende comunque la luce
+--       (atteso vero: l'interruttore agisce sul bus KNX)
+CTLSPEC AG ((broker.stato = guasto & interruttore & !luce_impianto) -> AX luce_impianto)
+
+
+--======= PUNTI CRITICI DEL COMANDO =======--
+-- vero = il componente e' un punto critico: se si guasta, nessun comando arriva alla luce
+-- falso = non lo e': il controesempio mostra il componente guasto e il percorso disponibile
+
+-- [PC1] pannello (atteso vero)
+CTLSPEC AG (pannello.stato = guasto -> !percorso_comando)
+
+-- [PC2] Core (atteso vero)
+CTLSPEC AG (core.stato = guasto -> !percorso_comando)
+
+-- [PC3] broker (atteso vero)
+CTLSPEC AG (broker.stato = guasto -> !percorso_comando)
+
+-- [PC4] device (atteso vero)
+CTLSPEC AG (device.stato = guasto -> !percorso_comando)
+
+-- [PC5] CommandAgent (atteso vero)
+CTLSPEC AG (command_agent.stato = guasto -> !percorso_comando)
+
+-- [PC6] gateway (atteso vero)
+CTLSPEC AG (gateway.stato = guasto -> !percorso_comando)
+
+-- [PC7] Provisioner
+--       (atteso falso: non e' un punto critico per un CommandAgent gia' operativo;
+--        lo diventa durante la ripresa, vedi [R3])
+CTLSPEC AG (provisioner.stato = guasto -> !percorso_comando)
+
+-- [PC8] KNX listener
+--       (atteso falso: non e' un punto critico per il comando; la luce cambia,
+--        ma il pannello non lo vede, vedi [AL1])
+CTLSPEC AG (knx_listener.stato = guasto -> !percorso_comando)
+
+-- [PC9] Redis
+--       (atteso falso)
+CTLSPEC AG (redis.stato = guasto -> !percorso_comando)
+
+
+--======= ALLINEAMENTO FRA LUCE E PANNELLO =======--
+
+-- [AL1] allineamento: il pannello mostra sempre lo stato vero della luce
+--       (atteso falso: se la luce cambia mentre il percorso di ritorno non e' disponibile,
+--        l'evento e' perso)
+CTLSPEC AG allineato
+
+-- [AL2] conservazione: se il pannello e' allineato e il percorso di ritorno e' disponibile,
+--       al passo dopo e' ancora allineato (atteso vero: il disallineamento nasce solo
+--       da un evento perso)
+CTLSPEC AG ((allineato & evento_consegnato) -> AX allineato)
+
+-- [AL3] comando eseguito ma non visto: un comando accende la luce e il pannello
+--       continua a mostrarla spenta (atteso vero)
+CTLSPEC EF (comando = accendi & comando_consegnato & !luce_impianto & !evento_consegnato)
+
+-- [AL4] disallineamento permanente: il pannello puo' restare disallineato per sempre,
+--       anche con entrambi i percorsi di nuovo disponibili
+--       (atteso vero: un evento perso non viene recuperato finche' la luce non cambia di nuovo)
+CTLSPEC EF EG (!allineato & percorso_comando & evento_consegnato)
+
+-- [AL5] riallineamento: quando il pannello e' disallineato, prima o poi torna allineato
+--       (atteso falso: conseguenza di [AL4])
+CTLSPEC AG (!allineato -> AF allineato)
+
+
+--======= RIPRESA =======--
+-- [R1] ripresa con stabilita': se prima o poi i componenti smettono di guastarsi,
+--      ogni guasto del broker e' seguito dal ritorno del CommandAgent a operativo
+--      (atteso vero; LTL perche' l'ipotesi F G riguarda l'intero percorso)
+LTLSPEC (F G device.stato = funzionante & F G command_agent.stato = funzionante
+       & F G provisioner.stato = funzionante & F G core.stato = funzionante
+       & F G broker.stato = funzionante)
+        -> G (broker.stato = guasto -> F command_agent.fase = operativo)
+
+-- [R2] riavvio del device: se il device si guasta, al passo dopo il CommandAgent
+--      e' in provisioning (atteso vero)
+CTLSPEC AG (device.stato = guasto -> AX command_agent.fase = provisioning)
+
+-- [R3] dipendenza nascosta dal Provisioner: con il broker funzionante, se il Provisioner
+--      e' guasto il CommandAgent in provisioning non riesce a ripartire (atteso vero)
+CTLSPEC AG ((command_agent.fase = provisioning & broker.stato = funzionante
+            & provisioner.stato = guasto) -> AX command_agent.fase = provisioning)
+
+
+--======= STALLO DEL COMMAND AGENT =======--
+-- riavvio_remoto e' una FROZENVAR: le proprieta' di un solo scenario sono scritte come
+-- implicazione sullo stato iniziale, perche' una CTLSPEC deve valere in tutti gli stati iniziali
+-- il CommandAgent e' l'unico componente a bordo che riceve comandi dal cloud:
+-- se si blocca, non si puo' piu' comandare la luce ne' riavviare un agent da remoto
+
+-- [SA1] stallo definitivo: una volta che il CommandAgent si blocca, nessun comando arriva
+--       piu' alla luce, per sempre (atteso vero, anche con il riavvio da remoto)
+CTLSPEC AG (command_agent.stato = guasto -> AG !percorso_comando)
+
+-- [SA2] il CommandAgent non riparte: una volta bloccato, resta bloccato
+--       (atteso vero: il riavvio da remoto passa dal CommandAgent stesso)
+CTLSPEC AG (command_agent.stato = guasto -> AG command_agent.stato = guasto)
+
+-- [SA3] il riavvio da remoto serve agli altri agent: con il CommandAgent pronto,
+--       un KNX listener bloccato puo' tornare pronto (atteso vero)
+CTLSPEC riavvio_remoto -> EF (knx_listener.stato = guasto & command_agent.pronto & EF knx_listener.pronto)
+
+-- [SA4] senza riavvio da remoto, un KNX listener bloccato resta bloccato (atteso vero)
+CTLSPEC !riavvio_remoto -> AG (knx_listener.stato = guasto -> AG knx_listener.stato = guasto)
+
+-- [SA5] stallo doppio: se sono bloccati sia il CommandAgent sia il KNX listener,
+--       nemmeno il riavvio da remoto fa ripartire il listener (atteso vero)
+CTLSPEC AG ((command_agent.stato = guasto & knx_listener.stato = guasto) -> AG knx_listener.stato = guasto)
+
+-- [SA6] stallo non visibile: con il CommandAgent bloccato il percorso di ritorno puo'
+--       funzionare; il pannello continua ad aggiornarsi come se tutto andasse bene (atteso vero)
+CTLSPEC EF (command_agent.stato = guasto & evento_consegnato)
+
+-- [SA7] l'interruttore resta: con il CommandAgent bloccato, l'interruttore fisico
+--       accende comunque la luce (atteso vero)
+CTLSPEC AG ((command_agent.stato = guasto & interruttore & !luce_impianto) -> AX luce_impianto)
+
+-- [SA8] recuperabilita': da qualunque situazione il percorso del comando puo' tornare disponibile
+--       (atteso falso: conseguenza di [SA1])
+CTLSPEC AG EF percorso_comando
+
+
+--------------------------------------------------------------------------
+-- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
+--------------------------------------------------------------------------
+--   punti critici del ritorno  : AG (x.stato = guasto -> !evento_consegnato), come [PC1]-[PC9]
+--   tunnel KNX                 : disallineamento con listener operativo e gateway funzionante
+--   comando alterato           : AG ((comando = accendi & comando_consegnato) -> AX luce_impianto)
+--                                deve diventare falsa con un componente compromesso sul percorso
+--   esito del comando          : il comando eseguito viene sempre confermato al Core?
+--   device online nel pannello : online ma senza comandi, offline ma con i comandi
+--   riallineamento             : con la rilettura dei valori, [AL4] deve diventare falsa
+--
+--   licenze (con il modello delle licenze):
+--     il guasto del License Manager non blocca subito il modulo:
+--       CTLSPEC AG ((license_mgr.stato = guasto & copia_licenza = valida) -> EX copia_licenza = valida)   (atteso vero)
+--     ma puo' bloccarlo se dura:
+--       CTLSPEC EF (license_mgr.stato = guasto & copia_licenza = scaduta)                                   (atteso vero)
+--     al ritorno del License Manager il modulo torna utilizzabile:
+--       CTLSPEC AG ((license_mgr.stato = funzionante & core.stato != guasto) -> AX copia_licenza = valida)  (atteso vero)
+--     la luce non dipende dal License Manager:
+--       CTLSPEC AG (license_mgr.stato = guasto -> !percorso_comando)                                        (atteso falso)
+--     un License Manager compromesso puo' disattivare un modulo regolarmente licenziato:
+--       CTLSPEC EF (license_mgr.stato = compromesso & copia_licenza = valida & EX copia_licenza = scaduta)  (atteso vero)
+--     e' il primo caso in cui compromesso ha un effetto diverso da guasto (parte sulla sicurezza)
