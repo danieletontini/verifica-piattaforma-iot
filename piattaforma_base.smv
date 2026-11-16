@@ -251,7 +251,7 @@ broker          : componente;   -- broker MQTT
 device          : componente;   -- dispositivo (Logic Machine)
 command_agent   : ciclo_agent(device, provisioner, core, broker, FALSE, utente_mqtt);             -- esegue i comandi; non puo' riavviare se stesso
 knx_listener    : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- inoltra gli eventi del bus KNX
-sst_agent       : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- 
+stt_agent       : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- 
 gateway         : componente;   -- gateway KNX/IP
 event_agent     : componente;   -- agent del core che scrive gli eventi KNX in Redis
 redis           : componente;   -- Redis
@@ -351,7 +351,7 @@ JUSTICE provisioner.stato = funzionante
 -- fairness del KNX listenere e sst_agent: se il riavvio da remoto resta possibile, prima o poi arriva
 -- nessuna fairness per il CommandAgent: se si blocca, nessuno puo' farlo ripartire
 JUSTICE knx_listener.stato != guasto | !riavvio_listener
-JUSTICE sst_agent.stato != guasto | !riavvio_listener
+JUSTICE stt_agent.stato != guasto | !riavvio_listener
 
 
 --======= CONTROLLO DEL MODELLO =======--
