@@ -54,7 +54,7 @@
 --
 -- Le proprieta' sono numerate per categoria (C = controllo del modello, CM = comando,
 -- PC = punti critici, AL = allineamento fra luce e pannello, R = ripresa,
--- SA = stallo del CommandAgent);
+-- SA = stallo del CommandAgent, PP = primo provisioning);
 -- per ognuna sono indicati cosa verifica e il risultato atteso
 
 
@@ -287,7 +287,7 @@ primo_provisioning := utente_mqtt = assente
 ASSIGN
 init(luce_impianto) := FALSE;   -- la luce parte spenta
 init(luce_pannello) := FALSE;   -- e il pannello la mostra spenta
-init(utente_mqtt)   := assente;   -- il device non ha ancora chiesto le credenziali
+init(utente_mqtt)   := assente; -- il device non ha ancora chiesto le credenziali
 
 next(luce_impianto) :=
   case
@@ -507,10 +507,23 @@ CTLSPEC AG EF percorso_comando
 
 --======= PRIMO PROVISIONING =======--
 
+-- [PP1] il primo provisioning puo' avvenire, e l'utente viene creato
+-- (atteso vero)
+CTLSPEC EF primo_provisioning
 
+-- [PP2] il provisioning richiede almeno un passo
+CTLSPEC EF utente_mqtt = presente
 
+-- [PP3] con il broker guasto il primo provisioning non puo' avvenire
+-- (atteso vero)
+CTLSPEC AG(broker.stato = guasto -> !primo_provisioning)
 
+-- [PP4] se il broker e' guasto non e' possibile assegnare le credenziali mqtt
+CTLSPEC AG ((utente_mqtt = assente & broker.stato = guasto) -> AX utente_mqtt = assente)
 
+-- [PP5] se il broker e' guasto e non vi sono credenziali mqtt al passo successivo si rimane in provisioning
+CTLSPEC AG ((utente_mqtt = assente & broker.stato = guasto
+             & command_agent.fase = provisioning) -> AX command_agent.fase = provisioning)
 
 
 
