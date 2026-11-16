@@ -511,7 +511,8 @@ CTLSPEC AG EF percorso_comando
 -- (atteso vero)
 CTLSPEC EF primo_provisioning
 
--- [PP2] il provisioning richiede almeno un passo
+-- [PP2] verifica che l'utente venga creato
+-- (atteso vero)
 CTLSPEC EF utente_mqtt = presente
 
 -- [PP3] con il broker guasto il primo provisioning non puo' avvenire
@@ -519,14 +520,21 @@ CTLSPEC EF utente_mqtt = presente
 CTLSPEC AG(broker.stato = guasto -> !primo_provisioning)
 
 -- [PP4] se il broker e' guasto non e' possibile assegnare le credenziali mqtt
+-- (atteso vero)
 CTLSPEC AG ((utente_mqtt = assente & broker.stato = guasto) -> AX utente_mqtt = assente)
 
 -- [PP5] se il broker e' guasto e non vi sono credenziali mqtt al passo successivo si rimane in provisioning
+-- (attesp vero)
 CTLSPEC AG ((utente_mqtt = assente & broker.stato = guasto
              & command_agent.fase = provisioning) -> AX command_agent.fase = provisioning)
 
+-- [PP6] senza utente non e' possibile accendere la luce 
+-- (atteso vero: per essere pronto l'agent deve aver superato il provisioning)
+CTLSPEC AG (utente_mqtt = assente -> !percorso_comando)
 
-
+-- [PP7] prima o poi l'utente viene creato
+-- (atteso vero)
+CTLSPEC AG (utente_mqtt = assente -> AF utente_mqtt = presente)
 --------------------------------------------------------------------------
 -- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
 --------------------------------------------------------------------------
