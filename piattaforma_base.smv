@@ -226,10 +226,18 @@ VAR
 --     accendi = richiesta di accendere la luce
 --     spegni  = richiesta di spegnere la luce
 comando         : {nessuno, accendi, spegni};
-interruttore    : boolean;      -- qualcuno preme l'interruttore fisico (collegato al bus KNX)
+interruttore    : boolean;      -- qualcuno preme l'interruttore fisico 
+
+
+-- utente MQTT del device (creato dal Provisioner al primo provisioning)
+--   assente  = device registrato nel Core con il suo canale, ma senza credenziali MQTT
+--   presente = credenziali salvate nel Core e utente creato sul broker, con i permessi
+--              limitati al canale del device
+utente_mqtt     : {assente, presente};
+
 
 -- la luce
-luce_impianto   : boolean;      -- stato vero della luce nell'impianto (sul bus KNX)
+luce_impianto   : boolean;      -- stato vero della luce nell'impianto 
 luce_pannello   : boolean;      -- stato della luce mostrato nel pannello (ultimo valore arrivato in Redis)
 
 -- componenti
