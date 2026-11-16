@@ -553,11 +553,17 @@ CTLSPEC AG (utente_mqtt = assente -> AF utente_mqtt = presente)
 CTLSPEC EF device_online 
 
 
--- [ON2] un device non puo' risultare online con il command_agent non funzionante
--- (atteso falso)
-CTLSPEC AG (command_agent.stato = guasto -> !device_online)
+-- [ON2] il device puo' risultare online con il CommandAgent guasto
+-- (atteso vero: lo stato online dipende solo dallo StateTelemetryAgent)
+CTLSPEC EF (device_online & command_agent.stato = guasto)
 
--- [ON3] 
+-- [ON3] se il device e' online, i comandi arrivano
+-- (atteso falso: online e comandi passano da due agent e due connessioni separate)
+CTLSPEC AG (device_online -> percorso_comando)
+
+-- [ON4] stallo: il device puo' restare online per sempre senza ricevere comandi
+-- (atteso vero: il CommandAgent guasto non puo' essere riavviato da remoto)
+CTLSPEC EF EG (device_online & !percorso_comando)
 
 --------------------------------------------------------------------------
 -- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
