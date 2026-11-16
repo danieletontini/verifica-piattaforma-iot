@@ -78,7 +78,7 @@ next(stato) := {funzionante, guasto, compromesso};  -- i guasti compaiono e spar
 --======= MODELLO DEL CICLO DEGLI AGENT =======--
 -- ciclo comune agli agent del device (verificato sui main.php)
 -- puo_essere_riavviato: vero quando in questo passo un riavvio da remoto puo' raggiungere l'agent
-MODULE ciclo_agent(device, provisioner, core, broker, puo_essere_riavviato)
+MODULE ciclo_agent(device, provisioner, core, broker, puo_essere_riavviato, utente_mqtt)
 
 VAR
 -- stato del processo dell'agent
@@ -96,6 +96,9 @@ fase  : {provisioning, connessione, operativo};
 DEFINE
 -- vero quando l'agent puo' ricevere o inviare messaggi in questo passo
 pronto := fase = operativo & stato != guasto;
+
+-- vero quando l'agent sta chiedendo le credenziali al Provisioner
+richiede_credenziali := fase = provisioning & stato != guasto & device.stato != guasto;
 
 ASSIGN
 init(stato) := funzionante;   -- il processo parte in esecuzione
@@ -118,8 +121,9 @@ next(fase) :=
      device.stato = guasto | stato = guasto                : provisioning;
 
   -- PROVISIONING (getCredentials al Provisioner, che interroga il Core)
+  -- al primo provisioning serve anche il broker, per creare l'utente MQTT
      fase = provisioning & provisioner.stato != guasto
-                         & core.stato != guasto            : connessione;   -- credenziali ottenute
+                         & core.stato != guasto  & (utente_mqtt = presente | broker.stato != guasto)   : connessione;   -- credenziali ottenute
      fase = provisioning                                   : provisioning;  -- fallito: riprova
 
   -- CONNESSIONE (al broker)
@@ -245,8 +249,8 @@ pannello        : componente;   -- pannello web nel browser
 core            : componente;   -- Core con il suo database
 broker          : componente;   -- broker MQTT
 device          : componente;   -- dispositivo (Logic Machine)
-command_agent   : ciclo_agent(device, provisioner, core, broker, FALSE);             -- esegue i comandi; non puo' riavviare se stesso
-knx_listener    : ciclo_agent(device, provisioner, core, broker, riavvio_listener);  -- inoltra gli eventi del bus KNX
+command_agent   : ciclo_agent(device, provisioner, core, broker, FALSE, utente_mqtt);             -- esegue i comandi; non puo' riavviare se stesso
+knx_listener    : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- inoltra gli eventi del bus KNX
 gateway         : componente;   -- gateway KNX/IP
 event_agent     : componente;   -- agent del core che scrive gli eventi KNX in Redis
 redis           : componente;   -- Redis
@@ -273,9 +277,17 @@ evento_consegnato := gateway.stato != guasto & device.stato != guasto & knx_list
 -- vero quando il pannello mostra lo stato vero della luce
 allineato := luce_pannello = luce_impianto;
 
+-- vero quando in questo passo avviene il primo provisioning: l'utente non esiste ancora,
+-- almeno un agent chiede le credenziali, e Provisioner, Core e broker possono crearlo
+primo_provisioning := utente_mqtt = assente
+                    & (command_agent.richiede_credenziali | knx_listener.richiede_credenziali)
+                    & provisioner.stato != guasto & core.stato != guasto & broker.stato != guasto;
+
+
 ASSIGN
 init(luce_impianto) := FALSE;   -- la luce parte spenta
 init(luce_pannello) := FALSE;   -- e il pannello la mostra spenta
+init(utente_mqtt)   := assente;   -- il device non ha ancora chiesto le credenziali
 
 next(luce_impianto) :=
   case
@@ -299,6 +311,17 @@ next(luce_pannello) :=
 
   TRUE                                                  : luce_pannello;     -- il pannello mostra l'ultimo valore ricevuto
   esac;
+
+next(utente_mqtt) :=
+   case
+
+  -- primo provisioning
+     primo_provisioning                   :     presente;
+
+   TRUE                                   :     utente_mqtt;   -- se esiste gia' rimane quello o se e' assente
+   esac;
+
+
 
 -- al massimo due componenti non funzionanti alla volta: con uno solo, la dipendenza
 -- del riavvio da remoto dal CommandAgent e dal resto del percorso non emergerebbe mai
@@ -481,6 +504,14 @@ CTLSPEC AG ((command_agent.stato = guasto & interruttore & !luce_impianto) -> AX
 -- [SA8] recuperabilita': da qualunque situazione il percorso del comando puo' tornare disponibile
 --       (atteso falso: conseguenza di [SA1])
 CTLSPEC AG EF percorso_comando
+
+--======= PRIMO PROVISIONING =======--
+
+
+
+
+
+
 
 
 --------------------------------------------------------------------------
