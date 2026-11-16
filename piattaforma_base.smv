@@ -251,6 +251,7 @@ broker          : componente;   -- broker MQTT
 device          : componente;   -- dispositivo (Logic Machine)
 command_agent   : ciclo_agent(device, provisioner, core, broker, FALSE, utente_mqtt);             -- esegue i comandi; non puo' riavviare se stesso
 knx_listener    : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- inoltra gli eventi del bus KNX
+sst_agent       : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- 
 gateway         : componente;   -- gateway KNX/IP
 event_agent     : componente;   -- agent del core che scrive gli eventi KNX in Redis
 redis           : componente;   -- Redis
@@ -274,13 +275,17 @@ evento_consegnato := gateway.stato != guasto & device.stato != guasto & knx_list
                    & broker.stato != guasto & event_agent.stato != guasto & redis.stato != guasto
                    & core.stato != guasto & pannello.stato != guasto;
 
+-- il device risulta online: lo StateTelemetryAgent e' connesso al broker
+-- (e' l'unico agent con il Last Will: se la connessione cade, il broker pubblica "offline")
+device_online := stt_agent.pronto & device.stato != guasto & broker.stato != guasto;
+
 -- vero quando il pannello mostra lo stato vero della luce
 allineato := luce_pannello = luce_impianto;
 
 -- vero quando in questo passo avviene il primo provisioning: l'utente non esiste ancora,
 -- almeno un agent chiede le credenziali, e Provisioner, Core e broker possono crearlo
 primo_provisioning := utente_mqtt = assente
-                    & (command_agent.richiede_credenziali | knx_listener.richiede_credenziali)
+                    & (command_agent.richiede_credenziali | knx_listener.richiede_credenziali | stt_agent.richiede_credenziali)
                     & provisioner.stato != guasto & core.stato != guasto & broker.stato != guasto;
 
 
@@ -328,8 +333,9 @@ next(utente_mqtt) :=
 INVAR toint(pannello.stato != funzionante) + toint(core.stato != funzionante)
     + toint(broker.stato != funzionante) + toint(device.stato != funzionante)
     + toint(command_agent.stato != funzionante) + toint(knx_listener.stato != funzionante)
-    + toint(gateway.stato != funzionante) + toint(event_agent.stato != funzionante)
-    + toint(redis.stato != funzionante) + toint(provisioner.stato != funzionante) <= 2
+    + toint(stt_agent.stato != funzionante) + toint(gateway.stato != funzionante) 
+    + toint(event_agent.stato != funzionante) + toint(redis.stato != funzionante) 
+    + toint(provisioner.stato != funzionante) <= 2
 
 -- fairness dei componenti: prima o poi tornano a funzionare; senza, i controesempi
 -- sarebbero banali (un componente che resta guasto per sempre)
@@ -342,9 +348,10 @@ JUSTICE event_agent.stato = funzionante
 JUSTICE redis.stato = funzionante
 JUSTICE provisioner.stato = funzionante
 
--- fairness del KNX listener: se il riavvio da remoto resta possibile, prima o poi arriva
+-- fairness del KNX listenere e sst_agent: se il riavvio da remoto resta possibile, prima o poi arriva
 -- nessuna fairness per il CommandAgent: se si blocca, nessuno puo' farlo ripartire
 JUSTICE knx_listener.stato != guasto | !riavvio_listener
+JUSTICE sst_agent.stato != guasto | !riavvio_listener
 
 
 --======= CONTROLLO DEL MODELLO =======--
@@ -535,6 +542,23 @@ CTLSPEC AG (utente_mqtt = assente -> !percorso_comando)
 -- [PP7] prima o poi l'utente viene creato
 -- (atteso vero)
 CTLSPEC AG (utente_mqtt = assente -> AF utente_mqtt = presente)
+
+
+
+
+--======= STATO ONLINE =======--
+
+-- [ON1] il device puo' risultare online
+-- (atteso vero)
+CTLSPEC EF device_online 
+
+
+-- [ON2] un device non puo' risultare online con il command_agent non funzionante
+-- (atteso falso)
+CTLSPEC AG (command_agent.stato = guasto -> !device_online)
+
+-- [ON3] 
+
 --------------------------------------------------------------------------
 -- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
 --------------------------------------------------------------------------
