@@ -225,6 +225,9 @@ riavvio_remoto  : boolean;      -- ipotesi: gli agent del device possono essere 
 
 secondo_canale  : boolean;      -- contromisura: e' stato implementato un secondo agent(StateTelemetryAgent)
                                 -- in grado di ricevere comandi di riavvio  
+
+scadenza_copia  : boolean;      -- FALSE = dev: la copia locale delle licenze non scade
+                                -- TRUE  = in produzione: la copia scade se non viene aggiornata(rinnovata)
 VAR
 -- ingressi ambientali
 --   comando: tasto premuto dall'utente nel pannello in questo passo
@@ -232,8 +235,9 @@ VAR
 --     accendi = richiesta di accendere la luce
 --     spegni  = richiesta di spegnere la luce
 comando         : {nessuno, accendi, spegni};
-interruttore    : boolean;      -- qualcuno preme l'interruttore fisico 
 
+interruttore    : boolean;      -- qualcuno preme l'interruttore fisico 
+comando_modulo  : boolean;      -- si ha necessità di un modulo con licenza 
 
 -- utente MQTT del device (creato dal Provisioner al primo provisioning)
 --   assente  = device registrato nel Core con il suo canale, ma senza credenziali MQTT
@@ -241,6 +245,12 @@ interruttore    : boolean;      -- qualcuno preme l'interruttore fisico
 --              limitati al canale del device
 utente_mqtt     : {assente, presente};
 
+-- licenza di un modulo opzionale
+licenza_attiva  : boolean;      -- stato vero della licenza sul License Manager (FALSE = revocata)
+-- copia locale della licenza nel database del Core
+--   valida  = il modulo puo' essere usato
+--   scaduta = non aggiornata in tempo, oppure cancellata ("nessuna licenza")
+copia_licenza   : {valida, scaduta};
 
 -- la luce
 luce_impianto   : boolean;      -- stato vero della luce nell'impianto 
@@ -258,13 +268,19 @@ gateway         : componente;   -- gateway KNX/IP
 event_agent     : componente;   -- agent del core che scrive gli eventi KNX in Redis
 redis           : componente;   -- Redis
 provisioner     : componente;   -- consegna le credenziali agli agent
-
+license_mgr     : componente;   -- License Manager: conosce lo stato vero delle licenze
 DEFINE
 -- vero quando un comando premuto in questo passo arriva fino alla luce
 -- percorso: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX
 percorso_comando := pannello.stato != guasto & core.stato != guasto & broker.stato != guasto
                   & device.stato != guasto & command_agent.pronto & gateway.stato != guasto;
 comando_consegnato := comando != nessuno & percorso_comando;
+
+-- vero quando un comando per il modulo con licenza arriva al device:
+-- stesso percorso del comando della luce, piu' il controllo della copia locale della licenza
+-- (il Core controlla la sua copia nel database, non chiede al License Manager a ogni comando)
+comando_modulo_consegnato := comando_modulo & percorso_comando & copia_licenza = valida;
+
 
 -- vero quando in questo passo un riavvio da remoto puo' raggiungere un agent del device:
 -- e' un comando, quindi segue il percorso del comando fino a un agent
@@ -293,10 +309,15 @@ primo_provisioning := utente_mqtt = assente
                     & provisioner.stato != guasto & core.stato != guasto & broker.stato != guasto;
 
 
+
 ASSIGN
 init(luce_impianto) := FALSE;   -- la luce parte spenta
 init(luce_pannello) := FALSE;   -- e il pannello la mostra spenta
 init(utente_mqtt)   := assente; -- il device non ha ancora chiesto le credenziali
+init(licenza_attiva) := TRUE;   -- all'avvio la licenza e' pagata
+init(copia_licenza)  := valida; -- e la copia locale la riporta
+
+
 
 next(luce_impianto) :=
   case
@@ -331,6 +352,35 @@ next(utente_mqtt) :=
    esac;
 
 
+-- la licenza puo' essere revocata in qualunque momento
+next(licenza_attiva) :=
+  case
+
+  -- REVOCA
+     licenza_attiva                                          : {TRUE, FALSE};  -- resta attiva o viene revocata
+
+  TRUE                                                       : FALSE;          -- gia' revocata: resta revocata
+  esac;
+
+-- la copia locale viene aggiornata da licence:retrieve, che il Core esegue
+-- interrogando il License Manager
+next(copia_licenza) :=
+  case
+
+  -- LICENSE MANAGER COMPROMESSO (risponde in modo scorretto)
+     license_mgr.stato = compromesso & core.stato != guasto  : {valida, scaduta};  -- puo' dire il falso in entrambi i sensi
+
+  -- LICENSE MANAGER FUNZIONANTE (risponde con lo stato vero della licenza)
+     license_mgr.stato = funzionante & core.stato != guasto
+                                     & licenza_attiva        : valida;             -- licenza presente: copia aggiornata
+     license_mgr.stato = funzionante & core.stato != guasto  : scaduta;            -- "nessuna licenza": copia cancellata (fail-closed)
+
+  -- LICENSE MANAGER NON RAGGIUNGIBILE (o Core guasto: licence:retrieve non gira)
+     scadenza_copia & copia_licenza = valida                 : {valida, scaduta};  -- con la scadenza, la copia puo' scadere
+
+  TRUE                                                       : copia_licenza;      -- fail-open: resta la copia locale
+  esac;
+
 
 -- al massimo due componenti non funzionanti alla volta: con uno solo, la dipendenza
 -- del riavvio da remoto dal CommandAgent e dal resto del percorso non emergerebbe mai
@@ -339,7 +389,7 @@ INVAR toint(pannello.stato != funzionante) + toint(core.stato != funzionante)
     + toint(command_agent.stato != funzionante) + toint(knx_listener.stato != funzionante)
     + toint(stt_agent.stato != funzionante) + toint(gateway.stato != funzionante) 
     + toint(event_agent.stato != funzionante) + toint(redis.stato != funzionante) 
-    + toint(provisioner.stato != funzionante) <= 2
+    + toint(provisioner.stato != funzionante) + toint(license_mgr.stato != funzionante) <= 2
 
 -- fairness dei componenti: prima o poi tornano a funzionare; senza, i controesempi
 -- sarebbero banali (un componente che resta guasto per sempre)
@@ -351,6 +401,7 @@ JUSTICE gateway.stato = funzionante
 JUSTICE event_agent.stato = funzionante
 JUSTICE redis.stato = funzionante
 JUSTICE provisioner.stato = funzionante
+JUSTICE license_mgr.stato = funzionante
 
 -- fairness degli agent del device: se il riavvio da remoto resta possibile, prima o poi arriva
 -- (per il CommandAgent solo con il secondo canale: senza, nessuno puo' farlo ripartire)
@@ -582,7 +633,7 @@ CTLSPEC EF EG (device_online & !percorso_comando)
 -- [SC1] con il secondo canale, un CommandAgent bloccato puo' tornare pronto (atteso vero)
 CTLSPEC (secondo_canale & riavvio_remoto) -> EF (command_agent.stato = guasto & EF command_agent.pronto)
 
--- [SC2] ...e puo' farlo sempre, finche' lo StateTelemetryAgent non e' bloccato (atteso vero)
+-- [SC2] puo' farlo sempre, finche' lo StateTelemetryAgent non e' bloccato (atteso vero)
 CTLSPEC (secondo_canale & riavvio_remoto)
         -> AG ((command_agent.stato = guasto & stt_agent.stato != guasto) -> EF command_agent.pronto)
 
