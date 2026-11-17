@@ -223,6 +223,8 @@ FROZENVAR
 riavvio_remoto  : boolean;      -- ipotesi: gli agent del device possono essere riavviati dal cloud;
                                 -- NuSMV verifica entrambi gli scenari, con e senza il meccanismo
 
+secondo_canale  : boolean;      -- contromisura: e' stato implementato un secondo agent(StateTelemetryAgent)
+                                -- in grado di ricevere comandi di riavvio  
 VAR
 -- ingressi ambientali
 --   comando: tasto premuto dall'utente nel pannello in questo passo
@@ -249,9 +251,9 @@ pannello        : componente;   -- pannello web nel browser
 core            : componente;   -- Core con il suo database
 broker          : componente;   -- broker MQTT
 device          : componente;   -- dispositivo (Logic Machine)
-command_agent   : ciclo_agent(device, provisioner, core, broker, FALSE, utente_mqtt);             -- esegue i comandi; non puo' riavviare se stesso
-knx_listener    : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- inoltra gli eventi del bus KNX
-stt_agent       : ciclo_agent(device, provisioner, core, broker, riavvio_listener, utente_mqtt);  -- 
+command_agent   : ciclo_agent(device, provisioner, core, broker, riavvio_agent, utente_mqtt);  -- esegue i comandi; non puo' riavviare se stesso
+knx_listener    : ciclo_agent(device, provisioner, core, broker, riavvio_agent, utente_mqtt);  -- inoltra gli eventi del bus KNX
+stt_agent       : ciclo_agent(device, provisioner, core, broker, riavvio_agent, utente_mqtt);  -- pubblica lo stato online; con il secondo canale riceve anche i riavvii
 gateway         : componente;   -- gateway KNX/IP
 event_agent     : componente;   -- agent del core che scrive gli eventi KNX in Redis
 redis           : componente;   -- Redis
@@ -264,10 +266,12 @@ percorso_comando := pannello.stato != guasto & core.stato != guasto & broker.sta
                   & device.stato != guasto & command_agent.pronto & gateway.stato != guasto;
 comando_consegnato := comando != nessuno & percorso_comando;
 
--- vero quando in questo passo un riavvio da remoto puo' raggiungere il KNX listener:
--- e' un comando, quindi segue il percorso del comando fino al CommandAgent (senza il gateway)
-riavvio_listener := riavvio_remoto & pannello.stato != guasto & core.stato != guasto
-                  & broker.stato != guasto & device.stato != guasto & command_agent.pronto;
+-- vero quando in questo passo un riavvio da remoto puo' raggiungere un agent del device:
+-- e' un comando, quindi segue il percorso del comando fino a un agent
+-- che riceve i riavvii: il CommandAgent, oppure lo StateTelemetryAgent con il secondo canale
+riavvio_agent := riavvio_remoto & pannello.stato != guasto & core.stato != guasto
+               & broker.stato != guasto & device.stato != guasto
+               & (command_agent.pronto | (secondo_canale & stt_agent.pronto));
 
 -- vero quando un cambiamento della luce in questo passo arriva fino al pannello
 -- percorso: bus KNX -> gateway -> device (KNX listener) -> broker -> event_agent -> Redis -> Core -> pannello
@@ -348,10 +352,11 @@ JUSTICE event_agent.stato = funzionante
 JUSTICE redis.stato = funzionante
 JUSTICE provisioner.stato = funzionante
 
--- fairness del KNX listenere e sst_agent: se il riavvio da remoto resta possibile, prima o poi arriva
--- nessuna fairness per il CommandAgent: se si blocca, nessuno puo' farlo ripartire
-JUSTICE knx_listener.stato != guasto | !riavvio_listener
-JUSTICE stt_agent.stato != guasto | !riavvio_listener
+-- fairness degli agent del device: se il riavvio da remoto resta possibile, prima o poi arriva
+-- (per il CommandAgent solo con il secondo canale: senza, nessuno puo' farlo ripartire)
+JUSTICE command_agent.stato != guasto | !riavvio_agent
+JUSTICE knx_listener.stato  != guasto | !riavvio_agent
+JUSTICE stt_agent.stato     != guasto | !riavvio_agent
 
 
 --======= CONTROLLO DEL MODELLO =======--
@@ -476,18 +481,19 @@ CTLSPEC AG ((command_agent.fase = provisioning & broker.stato = funzionante
 
 
 --======= STALLO DEL COMMAND AGENT =======--
--- riavvio_remoto e' una FROZENVAR: le proprieta' di un solo scenario sono scritte come
--- implicazione sullo stato iniziale, perche' una CTLSPEC deve valere in tutti gli stati iniziali
--- il CommandAgent e' l'unico componente a bordo che riceve comandi dal cloud:
+-- riavvio_remoto e secondo_canale sono FROZENVAR: le proprieta' di un solo scenario sono
+-- scritte come implicazione sullo stato iniziale, perche' una CTLSPEC deve valere in tutti
+-- gli stati iniziali
+-- senza il secondo canale il CommandAgent e' l'unico agent a bordo che riceve comandi dal cloud:
 -- se si blocca, non si puo' piu' comandare la luce ne' riavviare un agent da remoto
 
 -- [SA1] stallo definitivo: una volta che il CommandAgent si blocca, nessun comando arriva
---       piu' alla luce, per sempre (atteso vero, anche con il riavvio da remoto)
-CTLSPEC AG (command_agent.stato = guasto -> AG !percorso_comando)
+--       piu' alla luce, per sempre (atteso vero, anche con il riavvio da remoto; con il secondo canale vedi [SC1])
+CTLSPEC !secondo_canale -> AG (command_agent.stato = guasto -> AG !percorso_comando)
 
--- [SA2] il CommandAgent non riparte: una volta bloccato, resta bloccato
+-- [SA2] il CommandAgent non riparte: senza il secondo canale, una volta bloccato resta bloccato
 --       (atteso vero: il riavvio da remoto passa dal CommandAgent stesso)
-CTLSPEC AG (command_agent.stato = guasto -> AG command_agent.stato = guasto)
+CTLSPEC !secondo_canale -> AG (command_agent.stato = guasto -> AG command_agent.stato = guasto)
 
 -- [SA3] il riavvio da remoto serve agli altri agent: con il CommandAgent pronto,
 --       un KNX listener bloccato puo' tornare pronto (atteso vero)
@@ -497,8 +503,8 @@ CTLSPEC riavvio_remoto -> EF (knx_listener.stato = guasto & command_agent.pronto
 CTLSPEC !riavvio_remoto -> AG (knx_listener.stato = guasto -> AG knx_listener.stato = guasto)
 
 -- [SA5] stallo doppio: se sono bloccati sia il CommandAgent sia il KNX listener,
---       nemmeno il riavvio da remoto fa ripartire il listener (atteso vero)
-CTLSPEC AG ((command_agent.stato = guasto & knx_listener.stato = guasto) -> AG knx_listener.stato = guasto)
+--       nemmeno il riavvio da remoto fa ripartire il listener (atteso vero; con il secondo canale vedi [SC3])
+CTLSPEC !secondo_canale -> AG ((command_agent.stato = guasto & knx_listener.stato = guasto) -> AG knx_listener.stato = guasto)
 
 -- [SA6] stallo non visibile: con il CommandAgent bloccato il percorso di ritorno puo'
 --       funzionare; il pannello continua ad aggiornarsi come se tutto andasse bene (atteso vero)
@@ -509,7 +515,8 @@ CTLSPEC EF (command_agent.stato = guasto & evento_consegnato)
 CTLSPEC AG ((command_agent.stato = guasto & interruttore & !luce_impianto) -> AX luce_impianto)
 
 -- [SA8] recuperabilita': da qualunque situazione il percorso del comando puo' tornare disponibile
---       (atteso falso: conseguenza di [SA1])
+--       (atteso falso: conseguenza di [SA1]; resta falsa anche con il secondo canale,
+--        per lo stallo doppio di [SC4])
 CTLSPEC AG EF percorso_comando
 
 --======= PRIMO PROVISIONING =======--
@@ -554,7 +561,8 @@ CTLSPEC EF device_online
 
 
 -- [ON2] il device puo' risultare online con il CommandAgent guasto
--- (atteso vero: lo stato online dipende solo dallo StateTelemetryAgent)
+-- (atteso vero: senza il secondo canale il CommandAgent bloccato non riparte; con il
+--  secondo canale resta vera solo se il CommandAgent si blocca di nuovo dopo ogni riavvio)
 CTLSPEC EF (device_online & command_agent.stato = guasto)
 
 -- [ON3] se il device e' online, i comandi arrivano
@@ -564,6 +572,10 @@ CTLSPEC AG (device_online -> percorso_comando)
 -- [ON4] stallo: il device puo' restare online per sempre senza ricevere comandi
 -- (atteso vero: il CommandAgent guasto non puo' essere riavviato da remoto)
 CTLSPEC EF EG (device_online & !percorso_comando)
+
+
+
+
 
 --------------------------------------------------------------------------
 -- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
