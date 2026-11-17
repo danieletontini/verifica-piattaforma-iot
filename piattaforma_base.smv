@@ -575,7 +575,30 @@ CTLSPEC EF EG (device_online & !percorso_comando)
 
 
 
+--======= SECONDO CANALE DI RIAVVIO =======--
+-- contromisura implementata: anche lo StateTelemetryAgent riceve i comandi di riavvio
+-- (solo quelli: i comandi della luce passano sempre dal CommandAgent)
 
+-- [SC1] con il secondo canale, un CommandAgent bloccato puo' tornare pronto (atteso vero)
+CTLSPEC (secondo_canale & riavvio_remoto) -> EF (command_agent.stato = guasto & EF command_agent.pronto)
+
+-- [SC2] ...e puo' farlo sempre, finche' lo StateTelemetryAgent non e' bloccato (atteso vero)
+CTLSPEC (secondo_canale & riavvio_remoto)
+        -> AG ((command_agent.stato = guasto & stt_agent.stato != guasto) -> EF command_agent.pronto)
+
+-- [SC3] il KNX listener si riprende anche con il CommandAgent bloccato
+--       (atteso vero; senza il secondo canale vedi [SA5])
+CTLSPEC (secondo_canale & riavvio_remoto)
+        -> EF (command_agent.stato = guasto & knx_listener.stato = guasto & EF knx_listener.pronto)
+
+-- [SC4] stallo doppio: se si bloccano entrambi gli agent che ricevono i riavvii,
+--       restano bloccati per sempre (atteso vero: serve un intervento sul posto)
+CTLSPEC AG ((command_agent.stato = guasto & stt_agent.stato = guasto)
+            -> AG (command_agent.stato = guasto & stt_agent.stato = guasto))
+
+-- [SC5] recuperabilita' con il secondo canale: il percorso del comando puo' sempre
+--       tornare disponibile? (atteso falso: lo stallo doppio di [SC4])
+CTLSPEC (secondo_canale & riavvio_remoto) -> AG EF percorso_comando
 
 --------------------------------------------------------------------------
 -- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
