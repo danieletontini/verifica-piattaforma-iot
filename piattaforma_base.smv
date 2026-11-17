@@ -651,6 +651,70 @@ CTLSPEC AG ((command_agent.stato = guasto & stt_agent.stato = guasto)
 --       tornare disponibile? (atteso falso: lo stallo doppio di [SC4])
 CTLSPEC (secondo_canale & riavvio_remoto) -> AG EF percorso_comando
 
+
+--======= LICENZE =======--
+-- scadenza_copia e' una FROZENVAR: FALSE = la copia locale non scade,
+-- TRUE = la copia scade se non viene aggiornata
+-- licenza_attiva = stato vero della licenza; copia_licenza = quello che vede il Core
+
+-- [LI1] correttezza del modello: un comando al modulo con licenza puo' arrivare
+--       (atteso vero)
+CTLSPEC EF comando_modulo_consegnato
+
+-- [LI2] la luce dipende dal License Manager
+--       (atteso falso: il modulo KNX non ha licenza, ma la luce 
+--       funziona comunque; il License Manager guasto non blocca il modulo)
+CTLSPEC AG (license_mgr.stato = guasto -> !percorso_comando)
+
+-- [LI3] un License Manager guasto non blocca il modulo se la licenza e' tenuta in locale ela copia resta valida
+--       (atteso vero)
+CTLSPEC !scadenza_copia -> AG ((license_mgr.stato = guasto & copia_licenza = valida)
+                               -> AX copia_licenza = valida)
+
+-- [LI4] con la scadenza, License Manager guasto e copia scaduta bloccano il modulo
+--       anche con il percorso del comando disponibile (atteso vero)
+CTLSPEC scadenza_copia -> EF (license_mgr.stato = guasto & comando_modulo & percorso_comando
+                              & !comando_modulo_consegnato)
+
+-- [LI5] al ritorno del License Manager una licenza pagata torna valida (atteso vero)
+CTLSPEC AG ((licenza_attiva & license_mgr.stato = funzionante & core.stato != guasto)
+            -> AX copia_licenza = valida)
+
+
+-- revoca della licenza
+
+-- [LI6] la revoca ha effetto subito, se il License Manager e' raggiungibile
+--       (atteso vero)
+CTLSPEC AG ((!licenza_attiva & license_mgr.stato = funzionante & core.stato != guasto)
+            -> AX copia_licenza = scaduta)
+
+-- [LI7] con il License Manager irraggiungibile, la revoca resta senza effetto
+--       (atteso vero: la copia locale non scade)
+CTLSPEC !scadenza_copia -> AG ((!licenza_attiva & license_mgr.stato = guasto & copia_licenza = valida)
+                               -> AX copia_licenza = valida)
+
+-- [LI8] ...tanto che un modulo con la licenza revocata puo' ancora essere usato
+--       (atteso vero)
+CTLSPEC !scadenza_copia -> EF (!licenza_attiva & license_mgr.stato = guasto & comando_modulo_consegnato)
+
+-- [LI9] con la scadenza, la revoca puo' avere effetto anche senza License Manager
+--       (atteso vero: la copia scade)
+CTLSPEC scadenza_copia -> AG ((!licenza_attiva & license_mgr.stato = guasto & copia_licenza = valida)
+                              -> EX copia_licenza = scaduta)
+
+
+-- License Manager compromesso:
+
+-- [LI10] puo' disattivare un modulo regolarmente pagato (atteso vero)
+CTLSPEC EF (licenza_attiva & license_mgr.stato = compromesso & copia_licenza = valida
+            & EX copia_licenza = scaduta)
+
+-- [LI11] puo' riattivare una licenza revocata (atteso vero)
+CTLSPEC EF (!licenza_attiva & license_mgr.stato = compromesso & copia_licenza = scaduta
+            & EX copia_licenza = valida)
+
+
+            
 --------------------------------------------------------------------------
 -- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
 --------------------------------------------------------------------------
