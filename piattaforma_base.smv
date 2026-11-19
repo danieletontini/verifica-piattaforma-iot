@@ -137,84 +137,6 @@ next(fase) :=
   esac;
 
 
---------------------------------------------------------------------------
--- DA FARE: MODULI DEI PASSI SUCCESSIVI (solo commenti)
---------------------------------------------------------------------------
-
---======= MODELLO DEL CICLO DEL KNX LISTENER (DA FARE: 2) =======--
--- oggi knx_listener usa ciclo_agent. In cicli_agent.smv c'e' il modulo ciclo_knx_listener:
---   all'ingresso in RUN apre il tunnel KNXnet/IP: con il gateway guasto torna al provisioning;
---   collegamento_knx : {attivo, perso} = stato del tunnel, che puo' cadere senza che
---   il listener se ne accorga (da raffinare: perdita rilevata o silenziosa).
--- Per usarlo: copiare il modulo, cambiare il tipo di knx_listener in main e aggiungere
--- "knx_listener.collegamento_knx = attivo" al DEFINE evento_consegnato.
-
---======= MODELLO DEI MESSAGGI (DA FARE: 1) =======--
--- oggi un comando o un evento arriva se tutto il percorso e' disponibile nello stesso passo.
--- Estensioni, in ordine:
---   perdita libera: aggiungere a comando_consegnato ed evento_consegnato un ingresso
---     ambientale (es. comando_perso : boolean) per i tratti senza garanzia di consegna (QoS 0);
---   alterazione: se un componente del percorso e' compromesso, la luce puo' assumere
---     il valore opposto a quello richiesto (collegamento con la parte sulla sicurezza);
---   esito del comando (M2): variabile esito : {nessuno, atteso, confermato}, con il percorso
---     command_agent -> broker -> response_agent -> Redis -> Core;
---   percorso in piu' passi: una variabile per tratto, se serve distinguere dove si perde.
-
---======= MODELLO DELLE LICENZE (DA FARE: 4) =======--
--- alcuni moduli (es. BluKey) funzionano solo con una licenza; il modulo KNX no: e' sempre
--- abilitato, quindi la luce non dipende dalle licenze. Serve un secondo tipo di comando,
--- diretto a un modulo con licenza.
---
--- Meccanismo (dal codice del Core: licence:retrieve e copia locale nel database):
---   License Manager raggiungibile e licenza presente -> la copia locale viene aggiornata
---   License Manager non raggiungibile                -> l'errore e' ignorato e resta valida
---                                                       la copia locale (fail-open)
---   copia locale non aggiornata da piu' di N giorni  -> scade (con N = 0 non scade mai)
---   License Manager risponde "nessuna licenza"       -> la copia locale viene cancellata (fail-closed)
---
--- Schema:
---   in main, VAR
---     license_mgr   : componente;        -- License Manager
---     -- copia locale delle licenze nel database del Core
---     --   valida  = il modulo con licenza puo' essere usato
---     --   scaduta = non aggiornata in tempo, oppure cancellata
---     copia_licenza : {valida, scaduta};
---     -- secondo ingresso ambientale: comando per un modulo con licenza
---     comando_modulo : boolean;
---
---   init(copia_licenza) := valida;
---   next(copia_licenza) :=
---     case
---     -- LICENSE MANAGER COMPROMESSO
---        license_mgr.stato = compromesso & core.stato != guasto : {valida, scaduta};  -- puo' rispondere "nessuna licenza"
---     -- LICENSE MANAGER FUNZIONANTE
---        license_mgr.stato = funzionante & core.stato != guasto : valida;             -- copia aggiornata
---     -- LICENSE MANAGER NON RAGGIUNGIBILE (o Core guasto: licence:retrieve non gira)
---        copia_licenza = valida                                 : {valida, scaduta};  -- il tempo passa: puo' scadere
---     TRUE                                                      : copia_licenza;
---     esac;
---
---   DEFINE comando_modulo_consegnato := comando_modulo & percorso_comando & copia_licenza = valida;
---
--- Astrazioni: i giorni di validita' non sono contati (la scadenza e' una scelta non
--- deterministica); una sola licenza per un solo modulo.
--- Ipotesi da rendere esplicita con una FROZENVAR (es. copia_senza_scadenza): con N = 0
--- la copia non scade mai e la riga "il tempo passa" non si applica.
--- Da aggiungere anche: license_mgr nell'INVAR e una JUSTICE license_mgr.stato = funzionante.
--- Da chiarire con il tutor: valore di N (local_database_days_of_validity) e frequenza di
--- licence:retrieve in produzione; se la licenza e' controllata a ogni comando del modulo
--- o solo all'attivazione del modulo nel pannello.
-
---======= MODELLO DEGLI ALTRI COMPONENTI (DA FARE: 3) =======--
---   stt_agent e state_agent : stato online/offline del device nel pannello (scade in Redis
---                             dopo 30 s) -> variabile device_online_pannello : boolean
---   agent del core          : cicli ricavati dal codice (event_agent puo' restare connesso
---                             senza sottoscrizioni o terminare; vedi 07_Agent nel vault)
---   reverb                  : aggiornamento in tempo reale del pannello aperto
---   rilettura               : se il tutor conferma che i valori vengono riletti, aggiungere
---                             a next(luce_pannello) una riga di riallineamento
---   scheduler               : composizione asincrona, quando piu' componenti scrivono lo stesso dato
-
 
 --======= MAIN =======--
 MODULE main
@@ -693,7 +615,7 @@ CTLSPEC AG ((!licenza_attiva & license_mgr.stato = funzionante & core.stato != g
 CTLSPEC !scadenza_copia -> AG ((!licenza_attiva & license_mgr.stato = guasto & copia_licenza = valida)
                                -> AX copia_licenza = valida)
 
--- [LI8] ...tanto che un modulo con la licenza revocata puo' ancora essere usato
+-- [LI8] un modulo con la licenza revocata puo' ancora essere usato
 --       (atteso vero)
 CTLSPEC !scadenza_copia -> EF (!licenza_attiva & license_mgr.stato = guasto & comando_modulo_consegnato)
 
