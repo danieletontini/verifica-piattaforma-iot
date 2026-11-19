@@ -653,28 +653,3 @@ CTLSPEC EF (licenza_attiva & license_mgr.stato = compromesso & copia_licenza = v
 CTLSPEC EF (!licenza_attiva & license_mgr.stato = compromesso & copia_licenza = scaduta
             & EX copia_licenza = valida)
 
-
-            
---------------------------------------------------------------------------
--- DA FARE: PROPRIETA' DEI PASSI SUCCESSIVI 
---------------------------------------------------------------------------
---   punti critici del ritorno  : AG (x.stato = guasto -> !evento_consegnato), come [PC1]-[PC9]
---   tunnel KNX                 : disallineamento con listener operativo e gateway funzionante
---   comando alterato           : AG ((comando = accendi & comando_consegnato) -> AX luce_impianto)
---                                deve diventare falsa con un componente compromesso sul percorso
---   esito del comando          : il comando eseguito viene sempre confermato al Core?
---   device online nel pannello : online ma senza comandi, offline ma con i comandi
---   riallineamento             : con la rilettura dei valori, [AL4] deve diventare falsa
---
---   licenze (con il modello delle licenze):
---     il guasto del License Manager non blocca subito il modulo:
---       CTLSPEC AG ((license_mgr.stato = guasto & copia_licenza = valida) -> EX copia_licenza = valida)   (atteso vero)
---     ma puo' bloccarlo se dura:
---       CTLSPEC EF (license_mgr.stato = guasto & copia_licenza = scaduta)                                   (atteso vero)
---     al ritorno del License Manager il modulo torna utilizzabile:
---       CTLSPEC AG ((license_mgr.stato = funzionante & core.stato != guasto) -> AX copia_licenza = valida)  (atteso vero)
---     la luce non dipende dal License Manager:
---       CTLSPEC AG (license_mgr.stato = guasto -> !percorso_comando)                                        (atteso falso)
---     un License Manager compromesso puo' disattivare un modulo regolarmente licenziato:
---       CTLSPEC EF (license_mgr.stato = compromesso & copia_licenza = valida & EX copia_licenza = scaduta)  (atteso vero)
---     e' il primo caso in cui compromesso ha un effetto diverso da guasto (parte sulla sicurezza)
