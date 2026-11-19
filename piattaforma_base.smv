@@ -160,6 +160,8 @@ comando         : {nessuno, accendi, spegni};
 
 interruttore    : boolean;      -- qualcuno preme l'interruttore fisico 
 comando_modulo  : boolean;      -- si ha necessità di un modulo con licenza 
+comando_perso   : boolean;      -- il comando si perde lungo l'andata anche con tutti i componenti funzionanti
+                              
 
 -- utente MQTT del device (creato dal Provisioner al primo provisioning)
 --   assente  = device registrato nel Core con il suo canale, ma senza credenziali MQTT
@@ -196,12 +198,12 @@ DEFINE
 -- percorso: pannello -> Core -> broker -> device (CommandAgent) -> gateway -> bus KNX
 percorso_comando := pannello.stato != guasto & core.stato != guasto & broker.stato != guasto
                   & device.stato != guasto & command_agent.pronto & gateway.stato != guasto;
-comando_consegnato := comando != nessuno & percorso_comando;
+comando_consegnato := comando != nessuno & percorso_comando & !comando_perso;
 
 -- vero quando un comando per il modulo con licenza arriva al device:
 -- stesso percorso del comando della luce, piu' il controllo della copia locale della licenza
 -- (il Core controlla la sua copia nel database, non chiede al License Manager a ogni comando)
-comando_modulo_consegnato := comando_modulo & percorso_comando & copia_licenza = valida;
+comando_modulo_consegnato := comando_modulo & percorso_comando & !comando_perso & copia_licenza = valida;
 
 
 -- vero quando in questo passo un riavvio da remoto puo' raggiungere un agent del device:
@@ -324,6 +326,8 @@ JUSTICE event_agent.stato = funzionante
 JUSTICE redis.stato = funzionante
 JUSTICE provisioner.stato = funzionante
 JUSTICE license_mgr.stato = funzionante
+-- fairness dei messaggi: non tutti i comandi si perdono per sempre
+JUSTICE !comando_perso
 
 -- fairness degli agent del device: se il riavvio da remoto resta possibile, prima o poi arriva
 -- (per il CommandAgent solo con il secondo canale: senza, nessuno puo' farlo ripartire)
@@ -370,6 +374,20 @@ CTLSPEC EF (comando = accendi & pannello.stato = funzionante & !comando_consegna
 --       (atteso vero: l'interruttore agisce sul bus KNX)
 CTLSPEC AG ((broker.stato = guasto & interruttore & !luce_impianto) -> AX luce_impianto)
 
+-- [CM7] perdita senza guasti: con il percorso del comando disponibile, la luce si accende
+--       al passo dopo - safety (AX)
+--       (atteso falso: il comando si puo' perdere anche con tutti i componenti funzionanti)
+CTLSPEC AG ((comando = accendi & percorso_comando & !luce_impianto) -> AX luce_impianto)
+
+-- [CM8] perdita visibile: se il comando si perde, il pannello resta coerente con la luce
+--       - safety (AX)
+--       (atteso vero: la luce non cambia e il pannello continua a mostrarla com'e')
+CTLSPEC AG ((comando != nessuno & percorso_comando & comando_perso & !interruttore & allineato)
+            -> AX allineato)
+
+-- [CM9] il comando si puo' perdere con entrambi i percorsi disponibili e il pannello
+--       allineato - raggiungibilita' (atteso vero)
+CTLSPEC EF (comando = accendi & percorso_comando & comando_perso & !luce_impianto & allineato)
 
 --======= PUNTI CRITICI DEL COMANDO =======--
 -- vero = il componente e' un punto critico: se si guasta, nessun comando arriva alla luce
